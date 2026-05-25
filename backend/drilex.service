@@ -1,0 +1,37 @@
+[Unit]
+Description=Drilex VPS Manager Backend
+Documentation=https://github.com/your/drilex
+After=network.target
+
+[Service]
+Type=simple
+User=drilex
+Group=drilex
+WorkingDirectory=/opt/drilex-backend
+EnvironmentFile=/opt/drilex-backend/.env
+ExecStart=/opt/drilex-backend/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=drilex
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/drilex-backend /home /var /opt /srv
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+# Capabilities needed for iptables and process signals
+AmbientCapabilities=CAP_NET_ADMIN CAP_KILL
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_KILL
+
+[Install]
+WantedBy=multi-user.target
