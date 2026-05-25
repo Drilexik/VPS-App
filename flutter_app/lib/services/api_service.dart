@@ -161,6 +161,23 @@ class ApiService {
     }
   }
 
+  Future<Map<String, dynamic>> readFile(String path) async {
+    try {
+      final r = await _dio.get('/api/disk/read', queryParameters: {'path': path});
+      return r.data as Map<String, dynamic>;
+    } on DioException catch (e) {
+      throw e.error ?? ApiException('Request failed');
+    }
+  }
+
+  Future<void> writeFile(String path, String content) async {
+    try {
+      await _dio.post('/api/disk/write', data: {'path': path, 'content': content});
+    } on DioException catch (e) {
+      throw e.error ?? ApiException('Request failed');
+    }
+  }
+
   Future<List<NetworkInterface>> getNetworkStats() async {
     try {
       final r = await _dio.get('/api/network/stats');

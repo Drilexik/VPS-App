@@ -128,6 +128,15 @@ class _DiskScreenState extends State<DiskScreen> {
     }
   }
 
+  Future<void> _openFile(DiskEntry entry) async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => FileViewerScreen(api: widget.api, entry: entry),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Column(
@@ -162,7 +171,9 @@ class _DiskScreenState extends State<DiskScreen> {
                             itemCount: _entries.length,
                             itemBuilder: (ctx, i) => _EntryTile(
                               entry: _entries[i],
-                              onTap: _entries[i].isDir ? () => _navigate(_entries[i].path) : null,
+                              onTap: _entries[i].isDir
+                                  ? () => _navigate(_entries[i].path)
+                                  : () => _openFile(_entries[i]),
                               onDelete: () => _delete(_entries[i]),
                             ),
                           ),
@@ -330,5 +341,203 @@ class _EntryTile extends StatelessWidget {
       default:
         return Icons.insert_drive_file_rounded;
     }
+  }
+}
+
+// ── File Viewer / Editor ──────────────────────────────────────────────────────
+
+class FileViewerScreen extends StatefulWidget {
+  final ApiService api;
+  final DiskEntry entry;
+
+  const FileViewerScreen({super.key, required this.api, required this.entry});
+
+  @override
+  State<FileViewerScreen> createState() => _FileViewerScreenState();
+}
+
+class _FileViewerScreenState extends State<FileViewerScreen> {
+  String? _content;
+  bool _loading = true;
+  String? _error;
+  bool _editing = false;
+  bool _saving = false;
+  late TextEditingController _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = TextEditingController();
+    _load();
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    setState(() { _loading = true; _error = null; });
+    try {
+      final data = await widget.api.readFile(widget.entry.path);
+      final content = data['content'] as String? ?? '';
+      if (mounted) {
+        setState(() {
+          _content = content;
+          _ctrl.text = content;
+          _loading = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) setState(() { _error = e.toString(); _loading = false; });
+    }
+  }
+
+  Future<void> _save() async {
+    setState(() => _saving = true);
+    try {
+      await widget.api.writeFile(widget.entry.path, _ctrl.text);
+      if (mounted) {
+        setState(() { _content = _ctrl.text; _editing = false; _saving = false; });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('File saved successfully'),
+            backgroundColor: AppColors.accent,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _saving = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Save failed: $e'), backgroundColor: AppColors.danger),
+        );
+      }
+    }
+  }
+
+  void _startEdit() {
+    _ctrl.text = _content ?? '';
+    setState(() => _editing = true);
+  }
+
+  void _cancelEdit() {
+    setState(() { _editing = false; _ctrl.text = _content ?? ''; });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(
+          widget.entry.name,
+          style: const TextStyle(fontSize: 14, fontFamily: 'monospace'),
+          overflow: TextOverflow.ellipsis,
+        ),
+        actions: _loading || _error != null
+            ? null
+            : _editing
+                ? [
+                    if (_saving)
+                      const Padding(
+                        padding: EdgeInsets.all(14),
+                        child: SizedBox(
+                          width: 18, height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                      )
+                    else ...[
+                      IconButton(
+                        icon: const Icon(Icons.close_rounded),
+                        onPressed: _cancelEdit,
+                        tooltip: 'Cancel',
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.save_rounded, color: AppColors.accent),
+                        onPressed: _save,
+                        tooltip: 'Save',
+                      ),
+                    ],
+                  ]
+                : [
+                    IconButton(
+                      icon: const Icon(Icons.edit_rounded),
+                      onPressed: _startEdit,
+                      tooltip: 'Edit',
+                    ),
+                  ],
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _error != null
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(mainAxisSize: MainAxisSize.min, children: [
+                      const Icon(Icons.error_outline, color: AppColors.danger, size: 40),
+                      const SizedBox(height: 12),
+                      Text(_error!,
+                          style: const TextStyle(color: AppColors.textDim, fontSize: 13),
+                          textAlign: TextAlign.center),
+                      const SizedBox(height: 16),
+                      ElevatedButton(onPressed: _load, child: const Text('Retry')),
+                    ]),
+                  ),
+                )
+              : _editing
+                  ? Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: TextField(
+                        controller: _ctrl,
+                        maxLines: null,
+                        expands: true,
+                        style: const TextStyle(
+                          fontSize: 12.5,
+                          fontFamily: 'monospace',
+                          color: AppColors.text,
+                          height: 1.5,
+                        ),
+                        decoration: InputDecoration(
+                          filled: true,
+                          fillColor: AppColors.surface,
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(8),
+                            borderSide: const BorderSide(color: AppColors.border),
+                          ),
+                          enabledBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(8),
+                            borderSide: const BorderSide(color: AppColors.border),
+                          ),
+                          focusedBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(8),
+                            borderSide: const BorderSide(color: AppColors.primary),
+                          ),
+                          contentPadding: const EdgeInsets.all(12),
+                        ),
+                      ),
+                    )
+                  : SingleChildScrollView(
+                      padding: const EdgeInsets.all(12),
+                      child: Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: AppColors.surface,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: AppColors.border),
+                        ),
+                        child: SelectableText(
+                          _content!.isEmpty ? '(empty file)' : _content!,
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            fontFamily: 'monospace',
+                            color: _content!.isEmpty ? AppColors.textDim : AppColors.text,
+                            height: 1.5,
+                          ),
+                        ),
+                      ),
+                    ),
+    );
   }
 }

@@ -1,3 +1,18 @@
+// Defensive int/double parsers — handle cases where JSON sends numbers as strings
+int _toInt(dynamic v) {
+  if (v == null) return 0;
+  if (v is int) return v;
+  if (v is double) return v.toInt();
+  return int.tryParse(v.toString()) ?? 0;
+}
+
+double _toDouble(dynamic v) {
+  if (v == null) return 0.0;
+  if (v is double) return v;
+  if (v is int) return v.toDouble();
+  return double.tryParse(v.toString()) ?? 0.0;
+}
+
 class CpuInfo {
   final String model;
   final int cores;
@@ -18,15 +33,15 @@ class CpuInfo {
   });
 
   factory CpuInfo.fromJson(Map<String, dynamic> j) => CpuInfo(
-        model: j['model'] ?? 'Unknown',
-        cores: j['cores'] ?? 1,
-        logicalCores: j['logical_cores'] ?? 1,
-        usagePercent: (j['usage_percent'] ?? 0).toDouble(),
+        model: j['model']?.toString() ?? 'Unknown',
+        cores: _toInt(j['cores']),
+        logicalCores: _toInt(j['logical_cores']),
+        usagePercent: _toDouble(j['usage_percent']),
         perCore: (j['per_core'] as List<dynamic>? ?? [])
-            .map((e) => (e as num).toDouble())
+            .map((e) => _toDouble(e))
             .toList(),
-        frequencyMhz: j['frequency_mhz']?.toDouble(),
-        temperature: j['temperature']?.toDouble(),
+        frequencyMhz: j['frequency_mhz'] != null ? _toDouble(j['frequency_mhz']) : null,
+        temperature: j['temperature'] != null ? _toDouble(j['temperature']) : null,
       );
 }
 
@@ -52,14 +67,14 @@ class RamInfo {
   });
 
   factory RamInfo.fromJson(Map<String, dynamic> j) => RamInfo(
-        total: j['total'] ?? 0,
-        used: j['used'] ?? 0,
-        free: j['free'] ?? 0,
-        percent: (j['percent'] ?? 0).toDouble(),
-        swapTotal: j['swap_total'] ?? 0,
-        swapUsed: j['swap_used'] ?? 0,
-        swapFree: j['swap_free'] ?? 0,
-        swapPercent: (j['swap_percent'] ?? 0).toDouble(),
+        total: _toInt(j['total']),
+        used: _toInt(j['used']),
+        free: _toInt(j['free']),
+        percent: _toDouble(j['percent']),
+        swapTotal: _toInt(j['swap_total']),
+        swapUsed: _toInt(j['swap_used']),
+        swapFree: _toInt(j['swap_free']),
+        swapPercent: _toDouble(j['swap_percent']),
       );
 }
 
@@ -77,10 +92,10 @@ class DiskInfo {
   });
 
   factory DiskInfo.fromJson(Map<String, dynamic> j) => DiskInfo(
-        total: j['total'] ?? 0,
-        used: j['used'] ?? 0,
-        free: j['free'] ?? 0,
-        percent: (j['percent'] ?? 0).toDouble(),
+        total: _toInt(j['total']),
+        used: _toInt(j['used']),
+        free: _toInt(j['free']),
+        percent: _toDouble(j['percent']),
       );
 }
 
@@ -91,8 +106,8 @@ class NetSummary {
   const NetSummary({required this.bytesSent, required this.bytesRecv});
 
   factory NetSummary.fromJson(Map<String, dynamic> j) => NetSummary(
-        bytesSent: j['bytes_sent'] ?? 0,
-        bytesRecv: j['bytes_recv'] ?? 0,
+        bytesSent: _toInt(j['bytes_sent']),
+        bytesRecv: _toInt(j['bytes_recv']),
       );
 }
 
@@ -120,9 +135,9 @@ class SystemOverview {
         ram: RamInfo.fromJson(j['ram'] ?? {}),
         disk: DiskInfo.fromJson(j['disk'] ?? {}),
         network: NetSummary.fromJson(j['network'] ?? {}),
-        hostname: j['hostname'] ?? 'unknown',
-        os: j['os'] ?? 'unknown',
-        uptimeSeconds: j['uptime_seconds'] ?? 0,
+        hostname: j['hostname']?.toString() ?? 'unknown',
+        os: j['os']?.toString() ?? 'unknown',
+        uptimeSeconds: _toInt(j['uptime_seconds']),
       );
 }
 
@@ -146,13 +161,13 @@ class ProcessInfo {
   });
 
   factory ProcessInfo.fromJson(Map<String, dynamic> j) => ProcessInfo(
-        pid: j['pid'] ?? 0,
-        name: j['name'] ?? '',
-        cpuPercent: (j['cpu_percent'] ?? 0).toDouble(),
-        ramMb: (j['ram_mb'] ?? 0).toDouble(),
-        status: j['status'] ?? '',
-        command: j['command'] ?? '',
-        killable: j['killable'] ?? false,
+        pid: _toInt(j['pid']),
+        name: j['name']?.toString() ?? '',
+        cpuPercent: _toDouble(j['cpu_percent']),
+        ramMb: _toDouble(j['ram_mb']),
+        status: j['status']?.toString() ?? '',
+        command: j['command']?.toString() ?? '',
+        killable: j['killable'] == true,
       );
 }
 
@@ -172,11 +187,11 @@ class TopProcess {
   });
 
   factory TopProcess.fromJson(Map<String, dynamic> j) => TopProcess(
-        pid: j['pid'] ?? 0,
-        name: j['name'] ?? '',
-        cpuPercent: (j['cpu_percent'] ?? 0).toDouble(),
-        ramMb: (j['ram_mb'] ?? 0).toDouble(),
-        connections: j['connections'],
+        pid: _toInt(j['pid']),
+        name: j['name']?.toString() ?? '',
+        cpuPercent: _toDouble(j['cpu_percent']),
+        ramMb: _toDouble(j['ram_mb']),
+        connections: j['connections'] != null ? _toInt(j['connections']) : null,
       );
 }
 
@@ -187,7 +202,7 @@ class DiskFolder {
   const DiskFolder({required this.path, required this.size});
 
   factory DiskFolder.fromJson(Map<String, dynamic> j) =>
-      DiskFolder(path: j['path'] ?? '', size: j['size'] ?? 0);
+      DiskFolder(path: j['path']?.toString() ?? '', size: _toInt(j['size']));
 }
 
 class DiskEntry {
@@ -206,11 +221,11 @@ class DiskEntry {
   });
 
   factory DiskEntry.fromJson(Map<String, dynamic> j) => DiskEntry(
-        name: j['name'] ?? '',
-        path: j['path'] ?? '',
-        isDir: j['is_dir'] ?? false,
-        size: j['size'] ?? 0,
-        modified: (j['modified'] ?? 0).toDouble(),
+        name: j['name']?.toString() ?? '',
+        path: j['path']?.toString() ?? '',
+        isDir: j['is_dir'] == true,
+        size: _toInt(j['size']),
+        modified: _toDouble(j['modified']),
       );
 }
 
@@ -234,7 +249,7 @@ class BannedIp {
   final String ip;
   const BannedIp({required this.ip});
   factory BannedIp.fromJson(Map<String, dynamic> j) =>
-      BannedIp(ip: j['ip'] ?? '');
+      BannedIp(ip: j['ip']?.toString() ?? '');
 }
 
 class DockerContainer {
@@ -255,12 +270,12 @@ class DockerContainer {
   });
 
   factory DockerContainer.fromJson(Map<String, dynamic> j) => DockerContainer(
-        id: j['id'] ?? '',
-        name: j['name'] ?? '',
-        image: j['image'] ?? '',
-        status: j['status'] ?? '',
-        cpuPercent: (j['cpu_percent'] ?? 0).toDouble(),
-        ramMb: (j['ram_mb'] ?? 0).toDouble(),
+        id: j['id']?.toString() ?? '',
+        name: j['name']?.toString() ?? '',
+        image: j['image']?.toString() ?? '',
+        status: j['status']?.toString() ?? '',
+        cpuPercent: _toDouble(j['cpu_percent']),
+        ramMb: _toDouble(j['ram_mb']),
       );
 }
 

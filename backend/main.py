@@ -1,14 +1,17 @@
+import asyncio
+import json as _json
 import os
 import re
-import time
 import shlex
 import subprocess
+import time
 from typing import Optional
 
 import psutil
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -35,8 +38,17 @@ security = HTTPBearer()
 
 PROTECTED_PIDS = {1, 2}
 PROTECTED_NAMES = {"systemd", "sshd", "uvicorn", "init", "kthreadd", "kworker"}
-WHITELISTED_PATHS = {"/home", "/var", "/opt", "/srv", "/tmp/drilex"}
+
+# Extended whitelist — includes common config dirs
+WHITELISTED_PATHS = {
+    "/home", "/var", "/opt", "/srv", "/tmp/drilex",
+    "/etc/nginx", "/etc/systemd/system", "/etc/letsencrypt",
+    "/etc/cron.d", "/etc/cron.daily", "/etc/hosts",
+    "/root",
+}
+
 WHITELISTED_IPS = {"127.0.0.1", "::1"}
+MAX_FILE_SIZE = 2_000_000  # 2 MB limit for file read/write
 
 ALLOWED_COMMANDS = {
     "ps", "top", "df", "du", "ls", "cat", "grep", "docker",
@@ -45,7 +57,7 @@ ALLOWED_COMMANDS = {
     "lsof", "tail", "head", "wc", "sort", "uniq", "awk",
     "find", "ping", "traceroute", "curl", "wget", "nmap",
     "htop", "iotop", "iftop", "hostname", "uname", "date",
-    "env", "printenv", "echo", "stat",
+    "env", "printenv", "echo", "stat", "nginx", "certbot",
 }
 
 DANGEROUS_PATTERNS = [
@@ -61,13 +73,12 @@ DANGEROUS_PATTERNS = [
     r"mkfs\.",
     r"\bfdisk\b",
     r"\bparted\b",
-    r">\s*/etc/",
+    r">\s*/etc/passwd",
+    r">\s*/etc/shadow",
     r"chmod\s+[0-7]{3,4}\s+/",
-    r"chown\s+\S+\s+/[^h]",
     r"kill\s+-9\s+1\b",
     r"--no-preserve-root",
     r"mv\s+/\s+",
-    r"\bformat\b",
     r"\bwipefs\b",
 ]
 
@@ -78,6 +89,10 @@ IPv4_RE = re.compile(
 
 VALID_SIGNALS = {1, 2, 3, 9, 15}
 VALID_DOCKER_ACTIONS = {"start", "stop", "restart", "pause", "unpause", "remove"}
+
+# Alert cooldown state (per-process, resets on restart)
+_alert_state: dict[str, float] = {}
+ALERT_COOLDOWN = 300.0  # 5 minutes
 
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
@@ -94,7 +109,13 @@ def verify_token(creds: HTTPAuthorizationCredentials = Depends(security)) -> str
 
 def is_whitelisted(path: str) -> bool:
     p = os.path.normpath(path)
-    return any(p == wp or p.startswith(wp + "/") for wp in WHITELISTED_PATHS)
+    for wp in WHITELISTED_PATHS:
+        if p == wp or p.startswith(wp + "/") or p == os.path.normpath(wp):
+            return True
+    # Allow individual files explicitly in /etc
+    if p.startswith("/etc/nginx/") or p.startswith("/etc/systemd/system/"):
+        return True
+    return False
 
 
 def process_killable(proc: psutil.Process) -> bool:
@@ -115,12 +136,40 @@ def cpu_model() -> str:
     return "Unknown CPU"
 
 
-def fmt_bytes(b: int) -> str:
+def fmtBytes(b: int) -> str:
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if abs(b) < 1024:
             return f"{b:.1f} {unit}"
         b /= 1024
     return f"{b:.1f} PB"
+
+
+def _check_ssh(since_ts: float) -> list[str]:
+    """Returns SSH Accepted login lines since timestamp via journald."""
+    try:
+        result = subprocess.run(
+            ["journalctl", "_COMM=sshd",
+             "--since", f"@{int(since_ts)}",
+             "-o", "cat", "--no-pager", "-n", "50"],
+            capture_output=True, text=True, timeout=8,
+        )
+        logins = []
+        for line in result.stdout.splitlines():
+            if "Accepted" in line and ("password" in line or "publickey" in line):
+                logins.append(line.strip())
+        return logins
+    except Exception:
+        # Fallback: try auth.log
+        try:
+            result = subprocess.run(
+                ["grep", "-a", "Accepted", "/var/log/auth.log"],
+                capture_output=True, text=True, timeout=5,
+            )
+            # Only return lines newer than since_ts (grep can't filter by time easily, return last 3)
+            lines = result.stdout.strip().splitlines()
+            return lines[-3:] if lines else []
+        except Exception:
+            return []
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
@@ -143,6 +192,11 @@ class MkdirRequest(BaseModel):
 class DeleteRequest(BaseModel):
     path: str
     recursive: bool = False
+
+
+class WriteFileRequest(BaseModel):
+    path: str
+    content: str
 
 
 class BanRequest(BaseModel):
@@ -265,14 +319,16 @@ def _process_list():
 @limiter.limit("60/minute")
 async def top_cpu(request: Request, limit: int = 5, _: str = Depends(verify_token)):
     procs = sorted(_process_list(), key=lambda x: x["cpu_percent"], reverse=True)
-    return [{"pid": p["pid"], "name": p["name"], "cpu_percent": p["cpu_percent"], "ram_mb": p["ram_mb"], "status": p["status"]} for p in procs[:limit]]
+    return [{"pid": p["pid"], "name": p["name"], "cpu_percent": p["cpu_percent"],
+             "ram_mb": p["ram_mb"], "status": p["status"]} for p in procs[:limit]]
 
 
 @app.get("/api/stats/top-ram")
 @limiter.limit("60/minute")
 async def top_ram(request: Request, limit: int = 5, _: str = Depends(verify_token)):
     procs = sorted(_process_list(), key=lambda x: x["ram_mb"], reverse=True)
-    return [{"pid": p["pid"], "name": p["name"], "cpu_percent": p["cpu_percent"], "ram_mb": p["ram_mb"], "status": p["status"]} for p in procs[:limit]]
+    return [{"pid": p["pid"], "name": p["name"], "cpu_percent": p["cpu_percent"],
+             "ram_mb": p["ram_mb"], "status": p["status"]} for p in procs[:limit]]
 
 
 @app.get("/api/stats/top-network")
@@ -309,8 +365,14 @@ async def top_disk_folders(
         for line in result.stdout.strip().splitlines():
             if "\t" in line:
                 size_str, folder = line.split("\t", 1)
-                if folder.rstrip("/") != path.rstrip("/"):
-                    folders.append({"path": folder, "size": int(size_str)})
+                folder = folder.strip()
+                # Fix: strip whitespace before int conversion
+                try:
+                    size = int(size_str.strip())
+                except ValueError:
+                    continue
+                if os.path.normpath(folder) != os.path.normpath(path):
+                    folders.append({"path": folder, "size": size})
         return sorted(folders, key=lambda x: x["size"], reverse=True)[:limit]
     except Exception as exc:
         raise HTTPException(500, str(exc))
@@ -386,7 +448,7 @@ async def disk_list(request: Request, path: str = "/home", _: str = Depends(veri
                         "name": entry.name,
                         "path": entry.path,
                         "is_dir": entry.is_dir(),
-                        "size": st.st_size if not entry.is_dir() else 0,
+                        "size": int(st.st_size) if not entry.is_dir() else 0,
                         "modified": st.st_mtime,
                     }
                 )
@@ -394,6 +456,53 @@ async def disk_list(request: Request, path: str = "/home", _: str = Depends(veri
                 pass
         entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
         return {"path": path, "entries": entries}
+    except PermissionError:
+        raise HTTPException(403, f"Permission denied for path: {path}. "
+                            "Run service as root or adjust file permissions.")
+    except Exception as exc:
+        raise HTTPException(500, str(exc))
+
+
+@app.get("/api/disk/read")
+@limiter.limit("30/minute")
+async def disk_read(request: Request, path: str, _: str = Depends(verify_token)):
+    path = os.path.normpath(path)
+    if not is_whitelisted(path):
+        raise HTTPException(403, "Path not in whitelist")
+    if os.path.isdir(path):
+        raise HTTPException(400, "Path is a directory")
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        raise HTTPException(404, "File not found")
+    if size > MAX_FILE_SIZE:
+        raise HTTPException(413, f"File too large ({fmtBytes(size)}), max {fmtBytes(MAX_FILE_SIZE)}")
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+        return {"path": path, "content": content, "size": size}
+    except PermissionError:
+        raise HTTPException(403, "Permission denied. Check file ownership or run service as root.")
+    except Exception as exc:
+        raise HTTPException(500, str(exc))
+
+
+@app.post("/api/disk/write")
+@limiter.limit("20/minute")
+async def disk_write(request: Request, body: WriteFileRequest, _: str = Depends(verify_token)):
+    path = os.path.normpath(body.path)
+    if not is_whitelisted(path):
+        raise HTTPException(403, "Path not in whitelist")
+    if os.path.isdir(path):
+        raise HTTPException(400, "Path is a directory")
+    if len(body.content.encode("utf-8")) > MAX_FILE_SIZE:
+        raise HTTPException(413, f"Content too large, max {fmtBytes(MAX_FILE_SIZE)}")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(body.content)
+        return {"success": True, "path": path}
+    except PermissionError:
+        raise HTTPException(403, "Permission denied. Check file ownership or run service as root.")
     except Exception as exc:
         raise HTTPException(500, str(exc))
 
@@ -407,6 +516,8 @@ async def disk_mkdir(request: Request, body: MkdirRequest, _: str = Depends(veri
     try:
         os.makedirs(path, exist_ok=True)
         return {"success": True, "path": path}
+    except PermissionError:
+        raise HTTPException(403, "Permission denied. Check directory ownership or run service as root.")
     except Exception as exc:
         raise HTTPException(500, str(exc))
 
@@ -455,16 +566,33 @@ async def network_stats(request: Request, _: str = Depends(verify_token)):
 @limiter.limit("30/minute")
 async def network_banned(request: Request, _: str = Depends(verify_token)):
     try:
+        # Use iptables-save for exact rule format (avoids CIDR mismatch)
         r = subprocess.run(
-            ["iptables", "-L", "INPUT", "-n", "--line-numbers"],
+            ["iptables-save"],
             capture_output=True, text=True, timeout=10,
         )
+        if r.returncode != 0:
+            # Fallback to iptables -L
+            r = subprocess.run(
+                ["iptables", "-L", "INPUT", "-n"],
+                capture_output=True, text=True, timeout=10,
+            )
+        seen = set()
         banned = []
         for line in r.stdout.splitlines():
-            if "DROP" in line:
-                m = IPv4_RE.search(line)
-                if m:
-                    banned.append({"ip": m.group()})
+            if "DROP" not in line:
+                continue
+            # Match -s IP or -s IP/32
+            m = re.search(r"-s\s+([\d.]+)(?:/32)?(?:\s|$)", line)
+            if not m:
+                # Fallback: match any IPv4 in the line
+                m = re.search(r"\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b", line)
+                if not m:
+                    continue
+            ip = m.group(1)
+            if IPv4_RE.match(ip) and ip not in seen and ip not in WHITELISTED_IPS:
+                seen.add(ip)
+                banned.append({"ip": ip})
         return {"banned": banned}
     except FileNotFoundError:
         return {"banned": [], "warning": "iptables not available"}
@@ -494,14 +622,19 @@ async def network_ban(request: Request, body: BanRequest, _: str = Depends(verif
 async def network_unban(request: Request, body: UnbanRequest, _: str = Depends(verify_token)):
     if not IPv4_RE.match(body.ip):
         raise HTTPException(400, "Invalid IPv4 address")
-    try:
-        subprocess.run(
-            ["iptables", "-D", "INPUT", "-s", body.ip, "-j", "DROP"],
-            capture_output=True, text=True, timeout=10, check=True,
+    # Try both plain IP and IP/32 — iptables may store either variant
+    deleted = False
+    for fmt in [body.ip, f"{body.ip}/32"]:
+        r = subprocess.run(
+            ["iptables", "-D", "INPUT", "-s", fmt, "-j", "DROP"],
+            capture_output=True, text=True, timeout=10,
         )
-        return {"success": True, "ip": body.ip}
-    except subprocess.CalledProcessError as exc:
-        raise HTTPException(500, exc.stderr or "iptables error")
+        if r.returncode == 0:
+            deleted = True
+            break
+    if not deleted:
+        raise HTTPException(404, f"No DROP rule found for {body.ip}")
+    return {"success": True, "ip": body.ip}
 
 
 @app.get("/api/docker/containers")
@@ -629,3 +762,72 @@ async def terminal_exec(
         raise HTTPException(408, "Command timed out")
     except Exception as exc:
         raise HTTPException(500, str(exc))
+
+
+# ── SSE Real-time Events ───────────────────────────────────────────────────────
+
+@app.get("/api/events/stream")
+async def events_stream(request: Request, _: str = Depends(verify_token)):
+    """Server-Sent Events stream: stats every 5s + threshold alerts + SSH logins."""
+
+    last_ssh_ts = time.time()
+    alert_ts: dict[str, float] = {"cpu": 0.0, "ram": 0.0, "disk": 0.0}
+    COOLDOWN = 300.0  # 5 minutes per alert type
+
+    async def generate():
+        nonlocal last_ssh_ts
+
+        while True:
+            # Disconnect check
+            try:
+                if await request.is_disconnected():
+                    break
+            except Exception:
+                break
+
+            now = time.time()
+
+            # Stats snapshot
+            cpu = psutil.cpu_percent(interval=None)
+            ram = psutil.virtual_memory()
+            disk_u = psutil.disk_usage("/")
+
+            yield f"data: {_json.dumps({'type': 'stats', 'cpu': round(cpu, 1), 'ram': round(ram.percent, 1), 'disk': round(disk_u.percent, 1), 'timestamp': int(now)})}\n\n"
+
+            # CPU alert (>80%, 5min cooldown)
+            if cpu > 80 and now - alert_ts["cpu"] > COOLDOWN:
+                alert_ts["cpu"] = now
+                yield f"data: {_json.dumps({'type': 'alert', 'kind': 'cpu', 'value': round(cpu, 1), 'message': f'CPU usage high: {cpu:.1f}%'})}\n\n"
+
+            # RAM alert (>80%)
+            if ram.percent > 80 and now - alert_ts["ram"] > COOLDOWN:
+                alert_ts["ram"] = now
+                yield f"data: {_json.dumps({'type': 'alert', 'kind': 'ram', 'value': round(ram.percent, 1), 'message': f'RAM usage high: {ram.percent:.1f}%'})}\n\n"
+
+            # Disk alert (>90%)
+            if disk_u.percent > 90 and now - alert_ts["disk"] > COOLDOWN:
+                alert_ts["disk"] = now
+                yield f"data: {_json.dumps({'type': 'alert', 'kind': 'disk', 'value': round(disk_u.percent, 1), 'message': f'Disk usage critical: {disk_u.percent:.1f}%'})}\n\n"
+
+            # SSH login check (run in executor so it doesn't block event loop)
+            loop = asyncio.get_event_loop()
+            ssh_ts_snap = last_ssh_ts
+            ssh_logins = await loop.run_in_executor(None, _check_ssh, ssh_ts_snap)
+            last_ssh_ts = now
+            for login in ssh_logins:
+                yield f"data: {_json.dumps({'type': 'alert', 'kind': 'ssh', 'message': login})}\n\n"
+
+            # Heartbeat ping
+            yield f"data: {_json.dumps({'type': 'heartbeat', 'timestamp': int(now)})}\n\n"
+
+            await asyncio.sleep(5)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )

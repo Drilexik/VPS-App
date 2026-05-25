@@ -281,7 +281,99 @@ Potom upravte volání iptables v `main.py` – přidejte `"sudo"` jako první a
 
 ---
 
-## 13. Monitoring a údržba
+## 13. Redeployment
+
+### Backend – aktualizace kódu
+
+Po každé změně `main.py` nebo `requirements.txt` stačí:
+
+```bash
+# 1. Nahrajte změněné soubory na VPS
+scp ./backend/main.py drilex@your-vps:/opt/drilex-backend/main.py
+
+# Pokud změníte requirements.txt, aktualizujte i balíčky
+scp ./backend/requirements.txt drilex@your-vps:/opt/drilex-backend/requirements.txt
+sudo -u drilex bash -c "cd /opt/drilex-backend && source venv/bin/activate && pip install -r requirements.txt"
+
+# 2. Restartujte service
+sudo systemctl restart drilex
+
+# 3. Ověřte stav
+sudo systemctl status drilex
+curl http://127.0.0.1:8000/api/health
+```
+
+Pro hromadnou synchronizaci celého adresáře (doporučeno):
+```bash
+# rsync přeskočí nezměněné soubory
+rsync -av --exclude='venv/' --exclude='.env' \
+    ./backend/ drilex@your-vps:/opt/drilex-backend/
+
+# Poté restartujte
+ssh user@your-vps "sudo systemctl restart drilex"
+```
+
+> **Pozor:** Soubor `.env` nikdy nepřepisujte rsync/scp – obsahuje váš API klíč. Používejte `--exclude='.env'`.
+
+---
+
+### Backend – aktualizace systemd service nebo nginx
+
+Pokud změníte `drilex.service`:
+```bash
+scp ./backend/drilex.service drilex@your-vps:/tmp/drilex.service
+ssh user@your-vps "sudo cp /tmp/drilex.service /etc/systemd/system/drilex.service && sudo systemctl daemon-reload && sudo systemctl restart drilex"
+```
+
+Pokud změníte `nginx.conf`:
+```bash
+scp ./backend/nginx.conf user@your-vps:/tmp/nginx-drilex.conf
+ssh user@your-vps "sudo cp /tmp/nginx-drilex.conf /etc/nginx/sites-available/drilex && sudo nginx -t && sudo systemctl reload nginx"
+```
+
+> `nginx -t` ověří konfiguraci před reloadem – pokud selže, nginx se nepřestane.
+
+---
+
+### Flutter app – nový build a instalace APK
+
+Po každé změně Flutter kódu:
+
+```bash
+# Přejděte do složky flutter_app
+cd flutter_app
+
+# Pokud jste změnili pubspec.yaml (nové balíčky)
+flutter pub get
+
+# Sestavte release APK
+flutter build apk --release
+
+# APK se nachází v:
+# build/app/outputs/flutter-apk/app-release.apk
+```
+
+**Instalace přes USB (nejrychlejší):**
+```bash
+# Telefon musí mít zapnutý USB debugging
+flutter install --release
+```
+
+**Instalace ručně (bez USB debugging):**
+```bash
+# Zkopírujte APK na telefon
+adb push build/app/outputs/flutter-apk/app-release.apk /sdcard/Download/drilex.apk
+
+# Nebo přes Windows – zkopírujte APK do sdíleného úložiště telefonu
+# a nainstalujte v telefonu (Soubory → Stažené → drilex.apk)
+# Musíte povolit "Instalace z neznámých zdrojů" v Nastavení → Zabezpečení
+```
+
+> Při přechodu z debug na release APK, nebo při změně `applicationId`, může být nutné nejprve odinstalovat starou verzi.
+
+---
+
+## 14. Monitoring a údržba
 
 ```bash
 # Logy backendu
@@ -300,7 +392,7 @@ sudo certbot renew --dry-run
 
 ---
 
-## 14. Bezpečnostní doporučení
+## 15. Bezpečnostní doporučení
 
 - Používejte silný API klíč (minimálně 32 znaků, hex)
 - Nikdy nesdílejte API klíč
@@ -311,7 +403,7 @@ sudo certbot renew --dry-run
 
 ---
 
-## Struktura projektu
+## 16. Struktura projektu
 
 ```
 VPS-App/

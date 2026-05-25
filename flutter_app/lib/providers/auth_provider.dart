@@ -1,9 +1,13 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../services/api_service.dart';
 
 const _kUrl = 'drilex_api_url';
 const _kKey = 'drilex_api_key';
+// Plain SharedPreferences keys for WorkManager background isolate access
+const _kBgUrl = 'bg_api_url';
+const _kBgKey = 'bg_api_key';
 
 class AuthProvider extends ChangeNotifier {
   static const _storage = FlutterSecureStorage(
@@ -34,6 +38,10 @@ class AuthProvider extends ChangeNotifier {
   Future<void> save(String url, String key) async {
     await _storage.write(key: _kUrl, value: url);
     await _storage.write(key: _kKey, value: key);
+    // Also mirror to plain SharedPreferences for WorkManager background tasks
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kBgUrl, url);
+    await prefs.setString(_kBgKey, key);
     _apiUrl = url;
     _apiKey = key;
     _service = ApiService(baseUrl: url, apiKey: key);
@@ -43,6 +51,9 @@ class AuthProvider extends ChangeNotifier {
   Future<void> clear() async {
     await _storage.delete(key: _kUrl);
     await _storage.delete(key: _kKey);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_kBgUrl);
+    await prefs.remove(_kBgKey);
     _apiUrl = null;
     _apiKey = null;
     _service = null;
