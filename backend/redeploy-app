@@ -72,8 +72,12 @@ else
     git reset --hard "origin/$REPO_BRANCH" --quiet
     NEW=$(git rev-parse HEAD)
     if [ "$OLD" = "$NEW" ]; then
-        log "Už je aktuální (${NEW:0:7}) – končím"
-        exit 0
+        if [ "${1:-}" = "--force" ]; then
+            log "Už je aktuální (${NEW:0:7}) – ale --force, pokračuji"
+        else
+            log "Už je aktuální (${NEW:0:7}) – končím. (Použijte --force pro vynucený restart.)"
+            exit 0
+        fi
     fi
     info "$(git -C "$REPO_DIR" rev-parse --short $OLD) → $(git -C "$REPO_DIR" rev-parse --short $NEW)"
     FIRST_RUN=0
@@ -153,16 +157,33 @@ if ! systemctl is-enabled --quiet "$SERVICE" 2>/dev/null; then
     systemctl enable "$SERVICE" --quiet
 fi
 
-# ── 8. Install/update nginx config ──────────────────────────────
+# ── 8. Install/update nginx config (s auto-substitucí domény) ───
 NGX_DST="/etc/nginx/sites-available/$NGINX_SITE"
 NGX_LINK="/etc/nginx/sites-enabled/$NGINX_SITE"
 if [ -f "$INSTALL_DIR/nginx.conf" ] && command -v nginx >/dev/null; then
-    if ! cmp -s "$INSTALL_DIR/nginx.conf" "$NGX_DST" 2>/dev/null; then
+    # Detekce skutečné domény z existující konfigurace (pokud existuje)
+    REAL_DOMAIN=""
+    if [ -f "$NGX_DST" ]; then
+        REAL_DOMAIN=$(grep -oP 'server_name\s+\K[^;]+' "$NGX_DST" | grep -v '^_$' | awk '{print $1}' | head -1)
+    fi
+    # Vytvoř upravený config v temp souboru
+    TMP_NGX=$(mktemp)
+    cp "$INSTALL_DIR/nginx.conf" "$TMP_NGX"
+    if [ -n "$REAL_DOMAIN" ]; then
+        sed -i "s/your-domain\.example\.com/$REAL_DOMAIN/g" "$TMP_NGX"
+        info "Doména v nginx.conf: $REAL_DOMAIN"
+    else
+        warn "Nginx config v repu obsahuje 'your-domain.example.com' a žádná existující doména nebyla detekována – nginx config se neaktualizuje."
+        warn "Spusť ručně: sudo certbot --nginx -d TVOJE.DOMENA"
+        rm -f "$TMP_NGX"
+        TMP_NGX=""
+    fi
+    if [ -n "$TMP_NGX" ] && ! cmp -s "$TMP_NGX" "$NGX_DST" 2>/dev/null; then
         log "Aktualizuji nginx config"
         cp "$NGX_DST" "${NGX_DST}.bak" 2>/dev/null || true
-        cp "$INSTALL_DIR/nginx.conf" "$NGX_DST"
+        cp "$TMP_NGX" "$NGX_DST"
         [ -L "$NGX_LINK" ] || ln -sf "$NGX_DST" "$NGX_LINK"
-        if nginx -t 2>/dev/null; then
+        if nginx -t >/dev/null 2>&1; then
             systemctl reload nginx
             info "nginx reload OK"
         else
@@ -171,6 +192,7 @@ if [ -f "$INSTALL_DIR/nginx.conf" ] && command -v nginx >/dev/null; then
             nginx -t || true
         fi
     fi
+    [ -n "$TMP_NGX" ] && rm -f "$TMP_NGX"
 fi
 
 # ── 9. Restart service ──────────────────────────────────────────
