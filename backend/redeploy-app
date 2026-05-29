@@ -24,7 +24,7 @@ set -euo pipefail
 
 # ── Configuration ───────────────────────────────────────────────
 REPO_URL="https://github.com/Drilexik/VPS-App.git"
-REPO_BRANCH="main"
+REPO_BRANCH=""           # prázdné = auto-detekce (main/master)
 REPO_DIR="/opt/drilex-repo"
 INSTALL_DIR="/opt/drilex-backend"
 SERVICE="drilex"
@@ -46,15 +46,27 @@ command -v rsync  >/dev/null || die "rsync není nainstalován: apt install rsyn
 command -v python3 >/dev/null || die "python3 není nainstalován"
 command -v curl   >/dev/null || die "curl není nainstalován: apt install curl"
 
+# ── Auto-detect defaultní branch (main / master / cokoli jiného) ─
+detect_branch() {
+    git ls-remote --symref "$REPO_URL" HEAD 2>/dev/null \
+      | awk '/^ref:/ {sub("refs/heads/","",$2); print $2; exit}'
+}
+
 # ── 1. Clone (first run) or pull (subsequent runs) ──────────────
 if [ ! -d "$REPO_DIR/.git" ]; then
     log "První spuštění – klonuji repo"
     rm -rf "$REPO_DIR"
+    if [ -z "$REPO_BRANCH" ]; then
+        REPO_BRANCH=$(detect_branch || true)
+        [ -z "$REPO_BRANCH" ] && die "Repo $REPO_URL je nedostupné nebo prázdné (žádný commit). Pushněte alespoň jeden commit na GitHub a zkuste znovu."
+        info "Default branch: $REPO_BRANCH"
+    fi
     git clone --branch "$REPO_BRANCH" --depth 50 "$REPO_URL" "$REPO_DIR"
     FIRST_RUN=1
 else
-    log "Pulluju nejnovější změny z origin/$REPO_BRANCH"
     cd "$REPO_DIR"
+    [ -z "$REPO_BRANCH" ] && REPO_BRANCH=$(git symbolic-ref --short HEAD)
+    log "Pulluju nejnovější změny z origin/$REPO_BRANCH"
     git fetch --quiet origin "$REPO_BRANCH"
     OLD=$(git rev-parse HEAD)
     git reset --hard "origin/$REPO_BRANCH" --quiet
