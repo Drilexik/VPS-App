@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────
+#  Drilex VPS – Auto-redeploy z GitHubu
+#  Usage:  sudo ./redeploy.sh           (jednorázově)
+#          Cron: */5 * * * * /opt/drilex-backend/redeploy.sh
+#
+#  Při prvním spuštění udělá kompletní install:
+#    - naklonuje repo
+#    - vytvoří uživatele drilex
+#    - vytvoří Python venv + nainstaluje balíčky
+#    - vygeneruje .env s náhodným API klíčem
+#    - nainstaluje systemd service + nginx config
+#    - spustí service
+#
+#  Každý další běh:
+#    - git pull (pokud nic nového, končí ihned)
+#    - rsync změněných souborů (zachová .env + venv)
+#    - pip install pokud se změnil requirements.txt
+#    - reload systemd/nginx pokud se změnily
+#    - restart service + health check
+# ─────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+# ── Configuration ───────────────────────────────────────────────
+REPO_URL="https://github.com/Drilexik/VPS-App.git"
+REPO_BRANCH="main"
+REPO_DIR="/opt/drilex-repo"
+INSTALL_DIR="/opt/drilex-backend"
+SERVICE="drilex"
+NGINX_SITE="drilex"
+USER_NAME="drilex"
+HEALTH_URL="http://127.0.0.1:8000/api/health"
+
+# ── Pretty printing ─────────────────────────────────────────────
+G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; B='\033[0;34m'; N='\033[0m'
+log()  { echo -e "${G}==>${N} $*"; }
+info() { echo -e "${B}  ·${N} $*"; }
+warn() { echo -e "${Y}[!]${N} $*"; }
+die()  { echo -e "${R}[ERROR]${N} $*" >&2; exit 1; }
+
+# ── Sanity checks ───────────────────────────────────────────────
+[ "$EUID" -eq 0 ] || die "Spusť jako root: sudo $0"
+command -v git    >/dev/null || die "git není nainstalován: apt install git"
+command -v rsync  >/dev/null || die "rsync není nainstalován: apt install rsync"
+command -v python3 >/dev/null || die "python3 není nainstalován"
+command -v curl   >/dev/null || die "curl není nainstalován: apt install curl"
+
+# ── 1. Clone (first run) or pull (subsequent runs) ──────────────
+if [ ! -d "$REPO_DIR/.git" ]; then
+    log "První spuštění – klonuji repo"
+    rm -rf "$REPO_DIR"
+    git clone --branch "$REPO_BRANCH" --depth 50 "$REPO_URL" "$REPO_DIR"
+    FIRST_RUN=1
+else
+    log "Pulluju nejnovější změny z origin/$REPO_BRANCH"
+    cd "$REPO_DIR"
+    git fetch --quiet origin "$REPO_BRANCH"
+    OLD=$(git rev-parse HEAD)
+    git reset --hard "origin/$REPO_BRANCH" --quiet
+    NEW=$(git rev-parse HEAD)
+    if [ "$OLD" = "$NEW" ]; then
+        log "Už je aktuální (${NEW:0:7}) – končím"
+        exit 0
+    fi
+    info "$(git -C "$REPO_DIR" rev-parse --short $OLD) → $(git -C "$REPO_DIR" rev-parse --short $NEW)"
+    FIRST_RUN=0
+fi
+
+# ── 2. Auto-detect backend folder (root or VPS-App/backend) ─────
+if [ -d "$REPO_DIR/backend" ]; then
+    SRC="$REPO_DIR/backend"
+elif [ -d "$REPO_DIR/VPS-App/backend" ]; then
+    SRC="$REPO_DIR/VPS-App/backend"
+else
+    die "Nepodařilo se najít backend/ ve struktuře repa"
+fi
+info "Source: $SRC"
+
+# ── 3. Ensure user + group exist ────────────────────────────────
+if ! id "$USER_NAME" &>/dev/null; then
+    log "Vytvářím uživatele $USER_NAME"
+    useradd -r -m -d "$INSTALL_DIR" -s /bin/bash "$USER_NAME"
+fi
+# Add to docker group if Docker is installed (for Docker management endpoints)
+if getent group docker >/dev/null && ! id -nG "$USER_NAME" | grep -qw docker; then
+    info "Přidávám $USER_NAME do skupiny docker"
+    usermod -aG docker "$USER_NAME"
+fi
+
+# ── 4. Sync code (preserves .env + venv) ────────────────────────
+log "Synchronizuji soubory backendu"
+mkdir -p "$INSTALL_DIR"
+rsync -a --delete \
+    --exclude='venv/' \
+    --exclude='.env' \
+    --exclude='__pycache__/' \
+    "$SRC/" "$INSTALL_DIR/"
+chown -R "$USER_NAME:$USER_NAME" "$INSTALL_DIR"
+chmod +x "$INSTALL_DIR/redeploy.sh" 2>/dev/null || true
+
+# ── 5. Python venv + dependencies ───────────────────────────────
+if [ ! -d "$INSTALL_DIR/venv" ]; then
+    log "Vytvářím Python venv"
+    sudo -u "$USER_NAME" python3 -m venv "$INSTALL_DIR/venv"
+fi
+log "Aktualizuji Python balíčky"
+sudo -u "$USER_NAME" "$INSTALL_DIR/venv/bin/pip" install -q --upgrade pip
+sudo -u "$USER_NAME" "$INSTALL_DIR/venv/bin/pip" install -q -r "$INSTALL_DIR/requirements.txt"
+
+# ── 6. Generate .env on first run with random API key ───────────
+if [ ! -f "$INSTALL_DIR/.env" ]; then
+    KEY=$(openssl rand -hex 32 2>/dev/null || python3 -c 'import secrets; print(secrets.token_hex(32))')
+    warn ".env chybí – generuji nový s náhodným klíčem"
+    cat > "$INSTALL_DIR/.env" <<EOF
+DRILEX_API_KEY=$KEY
+EOF
+    chown "$USER_NAME:$USER_NAME" "$INSTALL_DIR/.env"
+    chmod 600 "$INSTALL_DIR/.env"
+    echo ""
+    echo "  ┌──────────────────────────────────────────────────────────────┐"
+    echo "  │  API Key (ulož do aplikace):                                 │"
+    echo "  │                                                              │"
+    echo "  │  $KEY  │"
+    echo "  │                                                              │"
+    echo "  └──────────────────────────────────────────────────────────────┘"
+    echo ""
+fi
+
+# ── 7. Install/update systemd service ───────────────────────────
+SVC_DST="/etc/systemd/system/$SERVICE.service"
+if [ -f "$INSTALL_DIR/drilex.service" ]; then
+    if ! cmp -s "$INSTALL_DIR/drilex.service" "$SVC_DST" 2>/dev/null; then
+        log "Aktualizuji systemd unit"
+        cp "$INSTALL_DIR/drilex.service" "$SVC_DST"
+        systemctl daemon-reload
+    fi
+fi
+if ! systemctl is-enabled --quiet "$SERVICE" 2>/dev/null; then
+    log "Aktivuji službu při bootu"
+    systemctl enable "$SERVICE" --quiet
+fi
+
+# ── 8. Install/update nginx config ──────────────────────────────
+NGX_DST="/etc/nginx/sites-available/$NGINX_SITE"
+NGX_LINK="/etc/nginx/sites-enabled/$NGINX_SITE"
+if [ -f "$INSTALL_DIR/nginx.conf" ] && command -v nginx >/dev/null; then
+    if ! cmp -s "$INSTALL_DIR/nginx.conf" "$NGX_DST" 2>/dev/null; then
+        log "Aktualizuji nginx config"
+        cp "$NGX_DST" "${NGX_DST}.bak" 2>/dev/null || true
+        cp "$INSTALL_DIR/nginx.conf" "$NGX_DST"
+        [ -L "$NGX_LINK" ] || ln -sf "$NGX_DST" "$NGX_LINK"
+        if nginx -t 2>/dev/null; then
+            systemctl reload nginx
+            info "nginx reload OK"
+        else
+            warn "nginx -t selhal – obnovuji předchozí config"
+            [ -f "${NGX_DST}.bak" ] && cp "${NGX_DST}.bak" "$NGX_DST"
+            nginx -t || true
+        fi
+    fi
+fi
+
+# ── 9. Restart service ──────────────────────────────────────────
+log "Restartuji službu"
+systemctl restart "$SERVICE"
+
+# ── 10. Health check ────────────────────────────────────────────
+sleep 3
+if systemctl is-active --quiet "$SERVICE"; then
+    if curl -fsS --max-time 5 "$HEALTH_URL" >/dev/null 2>&1; then
+        COMMIT=$(git -C "$REPO_DIR" rev-parse --short HEAD)
+        log "Deploy OK ✓  (commit ${COMMIT})"
+    else
+        warn "Služba běží, ale /api/health nereaguje. Logy:"
+        journalctl -u "$SERVICE" -n 20 --no-pager
+    fi
+else
+    die "Služba se nespustila. Logy: journalctl -u $SERVICE -n 50"
+fi

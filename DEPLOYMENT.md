@@ -281,7 +281,44 @@ Potom upravte volání iptables v `main.py` – přidejte `"sudo"` jako první a
 
 ## 13. Redeployment
 
-### Backend – aktualizace kódu
+### 🚀 Auto-deploy z GitHubu (doporučeno)
+
+Repo: https://github.com/Drilexik/VPS-App
+
+V `backend/redeploy.sh` je hotový skript, který:
+- při prvním spuštění udělá kompletní install (user, venv, .env s náhodným klíčem, systemd, nginx)
+- při dalších spuštěních pulluje z GitHubu, syncuje kód, restartuje službu
+- automaticky vynechá `.env` a `venv/` (zůstanou zachovány)
+- ověří health endpoint po restartu
+
+**První spuštění na čisté VPS:**
+```bash
+# Stáhněte skript přímo z GitHubu a spusťte
+curl -fsSL https://raw.githubusercontent.com/Drilexik/VPS-App/main/backend/redeploy.sh -o /tmp/redeploy.sh
+sudo bash /tmp/redeploy.sh
+```
+
+Skript vypíše náhodně vygenerovaný API klíč – uložte ho do aplikace na telefonu.
+
+**Každý další redeploy** (po push na GitHub):
+```bash
+sudo /opt/drilex-backend/redeploy.sh
+```
+
+**Plně automatický deploy přes cron** (každých 5 minut zkontroluje GitHub):
+```bash
+sudo crontab -e
+# Přidejte řádek:
+*/5 * * * * /opt/drilex-backend/redeploy.sh >> /var/log/drilex-deploy.log 2>&1
+```
+
+Skript je idempotentní – pokud na GitHubu nic nového, okamžitě skončí bez restartu.
+
+---
+
+### Manuální redeploy (bez GitHubu)
+
+#### Backend – aktualizace kódu
 
 Po každé změně `main.py` nebo `requirements.txt` stačí:
 
@@ -409,7 +446,8 @@ VPS-App/
 │   ├── requirements.txt     # Python závislosti
 │   ├── .env.example         # Šablona env proměnných
 │   ├── drilex.service       # Systemd service
-│   └── nginx.conf           # Nginx konfigurace
+│   ├── nginx.conf           # Nginx konfigurace
+│   └── redeploy.sh          # Auto-deploy skript (klonuje z GitHubu)
 ├── web_app/                 # Aplikace (Capacitor + vanilla JS)
 │   ├── package.json         # npm závislosti
 │   ├── capacitor.config.json
