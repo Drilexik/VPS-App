@@ -13,6 +13,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.security.utils import get_authorization_scheme_param
 from pydantic import BaseModel, validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -766,9 +767,25 @@ async def terminal_exec(
 
 # ── SSE Real-time Events ───────────────────────────────────────────────────────
 
+def verify_token_or_query(request: Request, token: Optional[str] = None) -> str:
+    """Accept Bearer header OR ?token=xxx query param. EventSource can't set headers."""
+    if not API_KEY:
+        raise HTTPException(500, "API key not configured on server")
+    # Try query param first (EventSource path)
+    if token and token == API_KEY:
+        return token
+    # Fall back to Bearer header
+    auth = request.headers.get("Authorization") or ""
+    scheme, creds = get_authorization_scheme_param(auth)
+    if scheme.lower() == "bearer" and creds == API_KEY:
+        return creds
+    raise HTTPException(401, "Invalid or missing API key")
+
+
 @app.get("/api/events/stream")
-async def events_stream(request: Request, _: str = Depends(verify_token)):
+async def events_stream(request: Request, token: Optional[str] = None):
     """Server-Sent Events stream: stats every 5s + threshold alerts + SSH logins."""
+    verify_token_or_query(request, token)
 
     last_ssh_ts = time.time()
     alert_ts: dict[str, float] = {"cpu": 0.0, "ram": 0.0, "disk": 0.0}
@@ -776,6 +793,10 @@ async def events_stream(request: Request, _: str = Depends(verify_token)):
 
     async def generate():
         nonlocal last_ssh_ts
+
+        # Tell EventSource to retry every 5s if disconnected, and send first packet immediately
+        yield "retry: 5000\n\n"
+        yield ": connected\n\n"
 
         while True:
             # Disconnect check

@@ -190,7 +190,9 @@ Pages.home = async function(root, api, monitor) {
     </div>
     <div class="section">
       <h3 class="section-title">System</h3>
-      <div id="home-info" class="list"></div>
+      <div id="home-info" class="list">
+        <div class="center-msg"><div class="spinner"></div></div>
+      </div>
     </div>
     <div class="section">
       <h3 class="section-title">Top CPU</h3>
@@ -203,20 +205,31 @@ Pages.home = async function(root, api, monitor) {
     setGauge('disk', disk);
   };
 
+  // Show last-known gauge values immediately (from monitor cache) — no blank state
+  update(monitor.cpuPercent, monitor.ramPercent, monitor.diskPercent);
+
+  // Subscribe to live updates
   const off = monitor.on('stats', (s) =>
     update(Number(s.cpu)||0, Number(s.ram)||0, Number(s.disk)||0)
   );
-  // Cleanup when navigating away
   root._cleanup = off;
 
-  try {
-    const ov = await api.overview();
+  // Fetch overview + top CPU in parallel; render each as it lands
+  const ovPromise = api.overview().catch(e => ({ _error: e.message }));
+  const topPromise = api.topCpu(5).catch(e => ({ _error: e.message }));
+
+  ovPromise.then(ov => {
+    const info = document.getElementById('home-info');
+    if (!info) return;
+    if (ov._error) {
+      info.innerHTML = errorBox(ov._error, () => App.showPage('home'));
+      return;
+    }
     const cpu  = ov.cpu  || {};
     const ram  = ov.ram  || {};
     const disk = ov.disk || {};
     update(num(cpu.usage_percent), num(ram.percent), num(disk.percent));
-
-    document.getElementById('home-info').innerHTML = `
+    info.innerHTML = `
       ${row('🖥', 'Hostname', ov.hostname || '—')}
       ${row('💻', 'OS', ov.os || '—')}
       ${row('⏱', 'Uptime', formatUptime(num(ov.uptime_seconds)))}
@@ -225,16 +238,22 @@ Pages.home = async function(root, api, monitor) {
       ${row('🔥', 'CPU Cores', `${cpu.cores || '—'} (${cpu.logical_cores || '?'} threads)`)}
       ${cpu.temperature ? row('🌡', 'CPU Temp', `${cpu.temperature}°C`) : ''}
     `;
-    const top = await api.topCpu(5);
-    document.getElementById('home-cpu').innerHTML = top.map(p => `
+  });
+
+  topPromise.then(top => {
+    const el = document.getElementById('home-cpu');
+    if (!el) return;
+    if (top._error || !Array.isArray(top)) {
+      el.innerHTML = empty('—');
+      return;
+    }
+    el.innerHTML = top.map(p => `
       <div class="bar-row">
         <span class="name">${escapeHtml(p.name)}</span>
         <span class="bar"><span class="fill" style="width: ${Math.min(100, num(p.cpu_percent))}%"></span></span>
         <span class="val">${num(p.cpu_percent).toFixed(1)}%</span>
       </div>`).join('') || empty('No processes');
-  } catch (e) {
-    document.getElementById('home-info').innerHTML = errorBox(e.message, () => App.showPage('home'));
-  }
+  });
 };
 
 // STATS – 4 bar charts: top CPU, top RAM, top Disk folders, top Network
@@ -708,7 +727,7 @@ function errorBox(msg, retry) {
   const id = 'r' + Math.random().toString(36).slice(2,8);
   setTimeout(() => { const el = document.getElementById(id); if (el && retry) el.onclick = retry; }, 0);
   return `<div class="center-msg">
-    <div style="color: var(--danger)">${escapeHtml(msg)}</div>
+    <div style="color: var(--danger); font-size: 13px; word-break: break-word">${escapeHtml(msg)}</div>
     <button class="btn primary" id="${id}">Retry</button>
   </div>`;
 }

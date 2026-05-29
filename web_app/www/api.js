@@ -10,7 +10,7 @@ class ApiClient {
   }
 
   // Send Request – internal helper: adds Bearer header, JSON body,
-  // 30s timeout. Throws Error with backend's detail message on failure.
+  // 10s timeout. Throws Error with backend's detail message on failure.
   async _req(path, opts = {}) {
     const url = this.baseUrl + path;
     const headers = {
@@ -23,20 +23,24 @@ class ApiClient {
       opts.body = JSON.stringify(opts.body);
     }
     const ctrl = new AbortController();
-    const tid = setTimeout(() => ctrl.abort(), opts.timeout || 30000);
+    const tid = setTimeout(() => ctrl.abort(), opts.timeout || 10000);
     try {
       const r = await fetch(url, { ...opts, headers, signal: ctrl.signal });
       clearTimeout(tid);
       if (!r.ok) {
-        let msg = `HTTP ${r.status}`;
-        try { const j = await r.json(); msg = j.detail || msg; } catch {}
+        let msg = `${r.status} ${r.statusText || ''}`.trim();
+        try { const j = await r.json(); if (j.detail) msg = j.detail; } catch {}
         throw new Error(msg);
       }
       const ct = r.headers.get('content-type') || '';
       return ct.includes('json') ? await r.json() : await r.text();
     } catch (e) {
       clearTimeout(tid);
-      if (e.name === 'AbortError') throw new Error('Request timed out');
+      if (e.name === 'AbortError') throw new Error(`Timeout: ${path}`);
+      // Network errors give "Failed to fetch" with no detail — add the path for debugging
+      if (e.message === 'Failed to fetch' || e.message === 'Network request failed') {
+        throw new Error(`Network error reaching ${path} (server unreachable or CORS/HTTPS issue)`);
+      }
       throw e;
     }
   }
