@@ -211,14 +211,19 @@ Pages.home = async function(root, api, monitor) {
 
   try {
     const ov = await api.overview();
-    update(num(ov.cpu_percent), num(ov.ram_percent), num(ov.disk_percent));
+    const cpu  = ov.cpu  || {};
+    const ram  = ov.ram  || {};
+    const disk = ov.disk || {};
+    update(num(cpu.usage_percent), num(ram.percent), num(disk.percent));
 
     document.getElementById('home-info').innerHTML = `
       ${row('🖥', 'Hostname', ov.hostname || '—')}
+      ${row('💻', 'OS', ov.os || '—')}
       ${row('⏱', 'Uptime', formatUptime(num(ov.uptime_seconds)))}
-      ${row('💾', 'RAM Used', `${fmtBytes(ov.ram_used)} / ${fmtBytes(ov.ram_total)}`)}
-      ${row('📁', 'Disk Used', `${fmtBytes(ov.disk_used)} / ${fmtBytes(ov.disk_total)}`)}
-      ${row('🔥', 'CPU Cores', String(ov.cpu_cores || '—'))}
+      ${row('💾', 'RAM', `${fmtBytes(ram.used)} / ${fmtBytes(ram.total)}`)}
+      ${row('📁', 'Disk', `${fmtBytes(disk.used)} / ${fmtBytes(disk.total)}`)}
+      ${row('🔥', 'CPU Cores', `${cpu.cores || '—'} (${cpu.logical_cores || '?'} threads)`)}
+      ${cpu.temperature ? row('🌡', 'CPU Temp', `${cpu.temperature}°C`) : ''}
     `;
     const top = await api.topCpu(5);
     document.getElementById('home-cpu').innerHTML = top.map(p => `
@@ -255,10 +260,14 @@ Pages.stats = async function(root, api) {
     const [cpu, ram, disk, net] = await Promise.all([
       api.topCpu(5), api.topRam(5), api.topDisk('/home', 5), api.topNetwork(5)
     ]);
-    document.getElementById('s-cpu').innerHTML  = barList(cpu,  p => p.name, p => num(p.cpu_percent), v => `${v.toFixed(1)}%`);
-    document.getElementById('s-ram').innerHTML  = barList(ram,  p => p.name, p => num(p.ram_percent), v => `${v.toFixed(1)}%`);
-    document.getElementById('s-disk').innerHTML = barList(disk, d => d.name, d => num(d.size_mb), v => fmtBytes(v*1024*1024), max => max);
-    document.getElementById('s-net').innerHTML  = barList(net,  p => p.name, p => num(p.bytes_per_sec || p.rate || 0), v => `${fmtBytes(v)}/s`);
+    // Backend returns: top-cpu [{pid,name,cpu_percent,ram_mb,status}]
+    document.getElementById('s-cpu').innerHTML  = barList(cpu, p => p.name, p => num(p.cpu_percent), v => `${v.toFixed(1)}%`);
+    // top-ram has same shape; show MB used
+    document.getElementById('s-ram').innerHTML  = barList(ram, p => p.name, p => num(p.ram_mb), v => `${fmtBytes(v * 1024 * 1024)}`);
+    // top-disk-folders: [{path, size}] – display folder basename + raw size
+    document.getElementById('s-disk').innerHTML = barList(disk, d => (d.path || '').split('/').pop() || d.path, d => num(d.size), v => fmtBytes(v));
+    // top-network: [{pid, name, connections}]
+    document.getElementById('s-net').innerHTML  = barList(net, p => p.name, p => num(p.connections), v => `${v} conn`);
   } catch (e) {
     root.innerHTML = errorBox(e.message, () => App.showPage('stats'));
   }
@@ -275,14 +284,17 @@ async function processList(root, api, sortBy) {
     const data = await api.processes(0, 30, sortBy);
     const list = document.getElementById('proc-list');
     if (!data.processes?.length) { list.innerHTML = empty('No processes'); return; }
+    // Backend returns: [{pid, name, cpu_percent, ram_mb, status, command, killable}]
     list.innerHTML = data.processes.map(p => `
       <div class="row">
         <div class="row-icon">${sortBy === 'cpu' ? '⚡' : '▣'}</div>
         <div class="row-main">
           <div class="row-title">${escapeHtml(p.name)}</div>
-          <div class="row-sub">PID ${p.pid} • ${escapeHtml(p.username||'?')} • CPU ${num(p.cpu_percent).toFixed(1)}% RAM ${num(p.ram_percent).toFixed(1)}%</div>
+          <div class="row-sub">PID ${p.pid} • CPU ${num(p.cpu_percent).toFixed(1)}% • RAM ${fmtBytes(num(p.ram_mb) * 1024 * 1024)} • ${escapeHtml(p.status || '')}</div>
         </div>
-        <button class="row-btn danger" data-pid="${p.pid}">Kill</button>
+        ${p.killable !== false
+          ? `<button class="row-btn danger" data-pid="${p.pid}">Kill</button>`
+          : `<span style="color: var(--text-dim); font-size: 11px">protected</span>`}
       </div>`).join('');
     list.querySelectorAll('[data-pid]').forEach(btn => {
       btn.onclick = () => confirmKill(api, Number(btn.dataset.pid), btn.parentElement);
@@ -311,11 +323,15 @@ const diskState = { stack: ['/home'] };
 Pages.disk = async function(root, api) {
   const path = diskState.stack[diskState.stack.length - 1];
   const canBack = diskState.stack.length > 1;
+  const shortcuts = ['/home', '/root', '/etc/nginx', '/etc/systemd/system', '/var', '/opt', '/srv'];
   root.innerHTML = `
     <div class="path-bar">
       ${canBack ? `<button class="icon-btn" id="d-back">←</button>` : ''}
       <div class="path">${escapeHtml(path)}</div>
-      <button class="icon-btn" id="d-mkdir" style="background: var(--primary-dim); color: var(--primary)">+</button>
+      <button class="icon-btn" id="d-mkdir" style="background: var(--primary-dim); color: var(--primary)" title="New folder">+</button>
+    </div>
+    <div style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px; overflow-x:auto">
+      ${shortcuts.map(p => `<button class="row-btn" data-jump="${escapeAttr(p)}">${escapeHtml(p)}</button>`).join('')}
     </div>
     <div id="disk-list" class="list"></div>`;
 
@@ -323,6 +339,9 @@ Pages.disk = async function(root, api) {
     diskState.stack.pop(); App.showPage('disk');
   };
   document.getElementById('d-mkdir').onclick = () => mkdirPrompt(api, path);
+  root.querySelectorAll('[data-jump]').forEach(btn => {
+    btn.onclick = () => { diskState.stack = [btn.dataset.jump]; App.showPage('disk'); };
+  });
 
   try {
     const data = await api.diskList(path);
@@ -510,13 +529,15 @@ Pages.docker = async function(root, api) {
     const list = r.containers || r;
     if (!list.length) { document.getElementById('docker-list').innerHTML = empty('No containers'); return; }
     document.getElementById('docker-list').innerHTML = list.map(c => {
-      const running = c.state === 'running' || c.status?.startsWith('Up');
+      // Backend returns {id,name,image,status,cpu_percent,ram_mb}; status is e.g. "running" or "exited"
+      const running = c.status === 'running' || c.state === 'running' || c.status?.startsWith?.('Up');
+      const stats = running ? ` • CPU ${num(c.cpu_percent).toFixed(1)}% • RAM ${fmtBytes(num(c.ram_mb) * 1024 * 1024)}` : '';
       return `
         <div class="row">
           <div class="row-icon" style="background: ${running ? 'var(--accent-dim)' : 'var(--surface-2)'}; color: ${running ? 'var(--accent)' : 'var(--text-dim)'}">◈</div>
           <div class="row-main">
             <div class="row-title">${escapeHtml(c.name)}</div>
-            <div class="row-sub">${escapeHtml(c.image || '?')} • ${escapeHtml(c.status || c.state || '?')}</div>
+            <div class="row-sub">${escapeHtml(c.image || '?')} • ${escapeHtml(c.status || '?')}${stats}</div>
           </div>
           <div class="row-actions">
             ${running

@@ -101,27 +101,28 @@ class MonitorService {
     }
   }
 
-  // Parse one SSE chunk ("event: X\ndata: {...}") → route to stats/alert handler
+  // Parse one SSE chunk → route by data.type (backend sends only "data:" lines,
+  // event kind is encoded in the JSON payload as `type`: stats/alert/heartbeat).
   _parseEvent(raw) {
-    let eventName = 'stats';
     let dataStr = '';
     for (const line of raw.split('\n')) {
-      if (line.startsWith('event:')) eventName = line.slice(6).trim();
-      else if (line.startsWith('data:')) dataStr += line.slice(5).trim();
+      if (line.startsWith('data:')) dataStr += line.slice(5).trim();
     }
     if (!dataStr) return;
     let data;
     try { data = JSON.parse(dataStr); } catch { return; }
 
-    if (eventName === 'stats') {
+    const kind = data.type || 'stats';
+    if (kind === 'stats') {
       // Cache latest values + broadcast to UI subscribers
       this.cpuPercent  = Number(data.cpu)  || 0;
       this.ramPercent  = Number(data.ram)  || 0;
       this.diskPercent = Number(data.disk) || 0;
       this._emit('stats', data);
-    } else if (eventName === 'alert') {
+    } else if (kind === 'alert') {
       this._handleAlert(data);
     }
+    // heartbeat → ignore (keepalive only)
   }
 
   // Dedupe alerts per kind (5min cooldown) + fire notification
