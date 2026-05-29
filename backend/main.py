@@ -5,6 +5,7 @@ import re
 import shlex
 import subprocess
 import time
+from collections import deque
 from typing import Optional
 
 import psutil
@@ -94,6 +95,10 @@ VALID_DOCKER_ACTIONS = {"start", "stop", "restart", "pause", "unpause", "remove"
 # Alert cooldown state (per-process, resets on restart)
 _alert_state: dict[str, float] = {}
 ALERT_COOLDOWN = 300.0  # 5 minutes
+
+# Queue for test notifications – drained by every active SSE generator
+_test_events: deque = deque(maxlen=50)
+VALID_TEST_KINDS = {"cpu", "ram", "disk", "ssh", "heartbeat"}
 
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
@@ -227,6 +232,17 @@ class TerminalRequest(BaseModel):
     @validator("timeout")
     def cap_timeout(cls, v):
         return min(max(v, 1), 30)
+
+
+class TestNotifyRequest(BaseModel):
+    kind: str
+    message: str = ""
+
+    @validator("kind")
+    def valid_kind(cls, v):
+        if v not in VALID_TEST_KINDS:
+            raise ValueError(f"kind must be one of {VALID_TEST_KINDS}")
+        return v
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -782,6 +798,29 @@ def verify_token_or_query(request: Request, token: Optional[str] = None) -> str:
     raise HTTPException(401, "Invalid or missing API key")
 
 
+# ── Test notification endpoint ────────────────────────────────────────────────
+
+@app.post("/api/test/notify")
+@limiter.limit("30/minute")
+async def test_notify(request: Request, body: TestNotifyRequest, _: str = Depends(verify_token)):
+    """Queue a fake alert event for all active SSE clients (used by `testnotifyapp`)."""
+    default_messages = {
+        "cpu":       "[TEST] CPU usage high: 92.5%",
+        "ram":       "[TEST] RAM usage high: 87.3%",
+        "disk":      "[TEST] Disk usage critical: 94.1%",
+        "ssh":       "[TEST] SSH login from 1.2.3.4 (user: root, publickey)",
+        "heartbeat": "[TEST] Heartbeat lost — server unreachable",
+    }
+    _test_events.append({
+        "type": "alert",
+        "kind": body.kind,
+        "message": body.message or default_messages[body.kind],
+        "timestamp": int(time.time()),
+        "test": True,
+    })
+    return {"ok": True, "queued": body.kind, "queue_size": len(_test_events)}
+
+
 @app.get("/api/events/stream")
 async def events_stream(request: Request, token: Optional[str] = None):
     """Server-Sent Events stream: stats every 5s + threshold alerts + SSH logins."""
@@ -814,6 +853,11 @@ async def events_stream(request: Request, token: Optional[str] = None):
             disk_u = psutil.disk_usage("/")
 
             yield f"data: {_json.dumps({'type': 'stats', 'cpu': round(cpu, 1), 'ram': round(ram.percent, 1), 'disk': round(disk_u.percent, 1), 'timestamp': int(now)})}\n\n"
+
+            # Drain queued test notifications (from /api/test/notify)
+            while _test_events:
+                ev = _test_events.popleft()
+                yield f"data: {_json.dumps(ev)}\n\n"
 
             # CPU alert (>80%, 5min cooldown)
             if cpu > 80 and now - alert_ts["cpu"] > COOLDOWN:

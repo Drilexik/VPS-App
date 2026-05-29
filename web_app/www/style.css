@@ -255,6 +255,7 @@ main#page-content {
 .toast.ram { border-left: 3px solid var(--accent); }
 .toast.disk { border-left: 3px solid var(--danger); }
 .toast.ssh { border-left: 3px solid var(--warning); }
+.toast.heartbeat { border-left: 3px solid #f43f5e; }   /* rose-500 */
 .toast.info { border-left: 3px solid var(--text-dim); }
 .toast.success { border-left: 3px solid var(--accent); }
 .toast.error { border-left: 3px solid var(--danger); }

@@ -23,6 +23,12 @@ class MonitorService {
     this.cpuPercent = 0;
     this.ramPercent = 0;
     this.diskPercent = 0;
+
+    // Heartbeat-lost detection (edge-triggered: fires once on loss, reset on next event)
+    this.lastEventAt = 0;
+    this.heartbeatLostNotified = false;
+    this.heartbeatTimeoutMs = 30 * 1000;   // 30s without any SSE/poll event = "lost"
+    this.heartbeatCheckTimer = null;
   }
 
   // Save credentials (called once after login)
@@ -49,22 +55,53 @@ class MonitorService {
     }
   }
 
-  // Start monitor — first try SSE, schedule poll fallback if no events within 6s
+  // Start monitor — try SSE, schedule poll fallback + heartbeat checker
   start() {
     if (this.mode !== 'idle' || !this.url) return;
+    this.lastEventAt = Date.now();   // reset so we don't immediately alert
+    this.heartbeatLostNotified = false;
     this._connectSSE();
     // Polling fallback if SSE doesn't deliver first stats within 6s
     this.fallbackTimer = setTimeout(() => {
       if (this.mode !== 'sse-ok') this._switchToPoll();
     }, 6000);
+    // Periodic heartbeat-lost check (every 5s)
+    this.heartbeatCheckTimer = setInterval(() => this._checkHeartbeat(), 5000);
   }
 
   stop() {
     if (this.es) { this.es.close(); this.es = null; }
     if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; }
     if (this.fallbackTimer) { clearTimeout(this.fallbackTimer); this.fallbackTimer = null; }
+    if (this.heartbeatCheckTimer) { clearInterval(this.heartbeatCheckTimer); this.heartbeatCheckTimer = null; }
     this.mode = 'idle';
     this._setConnected(false);
+  }
+
+  // Record any successful interaction (SSE event or poll response).
+  // Resets heartbeatLostNotified so a future loss fires the notification again.
+  _markActivity() {
+    this.lastEventAt = Date.now();
+    if (this.heartbeatLostNotified) {
+      this.heartbeatLostNotified = false;   // edge-triggered reset (silent, no toast)
+    }
+  }
+
+  // Periodic check: if no event for >timeout, fire heartbeat-lost notification ONCE.
+  // Will not re-fire until _markActivity() is called (i.e. connection restored).
+  _checkHeartbeat() {
+    if (this.mode === 'idle' || this.lastEventAt === 0) return;
+    const elapsed = Date.now() - this.lastEventAt;
+    if (elapsed > this.heartbeatTimeoutMs && !this.heartbeatLostNotified) {
+      this.heartbeatLostNotified = true;
+      const seconds = Math.floor(elapsed / 1000);
+      notify.show({
+        kind: 'heartbeat',
+        title: 'Drilex VPS',
+        body: `Spojení ztraceno (${seconds}s bez odezvy)`,
+      });
+      this._emit('alert', { kind: 'heartbeat', message: 'Heartbeat lost' });
+    }
   }
 
   // Open EventSource (token in URL — EventSource can't set custom headers)
@@ -76,6 +113,7 @@ class MonitorService {
       this.mode = 'sse';
 
       es.onmessage = (ev) => {
+        this._markActivity();
         if (this.mode !== 'sse-ok') {
           this.mode = 'sse-ok';
           if (this.fallbackTimer) { clearTimeout(this.fallbackTimer); this.fallbackTimer = null; }
@@ -117,10 +155,12 @@ class MonitorService {
         const ram  = Number(ov.ram?.percent)       || 0;
         const disk = Number(ov.disk?.percent)      || 0;
         this.cpuPercent = cpu; this.ramPercent = ram; this.diskPercent = disk;
+        this._markActivity();
         this._setConnected(true);
         this._emit('stats', { cpu, ram, disk, timestamp: Date.now() / 1000 });
       } catch (e) {
         this._setConnected(false);
+        // Heartbeat checker will fire alert once if poll keeps failing >30s
       }
     };
     poll();
@@ -141,17 +181,21 @@ class MonitorService {
     // heartbeat → ignore
   }
 
-  // Dedupe alerts per kind (5min cooldown) + fire notification
+  // Dedupe alerts per kind (5min cooldown) + fire notification.
+  // Test events (data.test === true) bypass the cooldown so testnotifyapp
+  // always delivers, even when re-run within 5 minutes.
   _handleAlert(data) {
     const kind = data.kind || 'info';
     const now = Date.now();
-    const last = this.lastAlertAt[kind] || 0;
-    if (now - last < this.cooldownMs) return;
-    this.lastAlertAt[kind] = now;
+    if (!data.test) {
+      const last = this.lastAlertAt[kind] || 0;
+      if (now - last < this.cooldownMs) return;
+      this.lastAlertAt[kind] = now;
+    }
     this._emit('alert', data);
     notify.show({
       kind,
-      title: data.title || 'Drilex VPS',
+      title: data.title || (data.test ? 'Drilex VPS (TEST)' : 'Drilex VPS'),
       body:  data.message || '',
     });
   }

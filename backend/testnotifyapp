@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────
+#  Drilex VPS – test notifikací
+#  Pošle 5 fake alertů (cpu, ram, disk, ssh, heartbeat) s 5s rozestupem.
+#  Aplikace s otevřeným SSE spojením je dostane jako notifikace.
+#
+#  Usage:  testnotifyapp                  (použije /opt/drilex-backend/.env)
+#          KEY=xxx URL=http://... testnotifyapp
+# ─────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+ENV_FILE="${ENV_FILE:-/opt/drilex-backend/.env}"
+URL="${URL:-http://127.0.0.1:8000}"
+GAP="${GAP:-5}"
+
+G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; B='\033[0;34m'; N='\033[0m'
+
+# Get API key from env or .env file
+if [ -z "${KEY:-}" ]; then
+    if [ ! -f "$ENV_FILE" ]; then
+        echo -e "${R}ERROR:${N} $ENV_FILE not found (override with KEY=xxx)" >&2
+        exit 1
+    fi
+    KEY=$(grep -E '^DRILEX_API_KEY=' "$ENV_FILE" | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d '[:space:]')
+fi
+if [ -z "$KEY" ]; then
+    echo -e "${R}ERROR:${N} API key not found" >&2
+    exit 1
+fi
+
+KINDS=(cpu ram disk ssh heartbeat)
+ICONS=("🔥" "💾" "📁" "🔐" "💔")
+TOTAL=${#KINDS[@]}
+
+echo -e "${B}┌─────────────────────────────────────────────┐${N}"
+echo -e "${B}│  Drilex VPS – test notifikací               │${N}"
+echo -e "${B}└─────────────────────────────────────────────┘${N}"
+echo "  URL:     $URL"
+echo "  Count:   $TOTAL alerty × ${GAP}s gap"
+echo ""
+echo -e "  ${Y}Otevři aplikaci a měj ji v popředí (nebo povol notifikace).${N}"
+echo ""
+
+for i in "${!KINDS[@]}"; do
+    kind="${KINDS[$i]}"
+    icon="${ICONS[$i]}"
+    n=$((i + 1))
+
+    echo -ne "${G}[$n/$TOTAL]${N} $icon  $kind ... "
+
+    response=$(curl -fsS -X POST \
+        -H "Authorization: Bearer $KEY" \
+        -H "Content-Type: application/json" \
+        -d "{\"kind\":\"$kind\"}" \
+        "$URL/api/test/notify" 2>&1) || {
+        echo -e "${R}FAIL${N}"
+        echo "  curl error: $response"
+        continue
+    }
+
+    queue_size=$(echo "$response" | grep -oE '"queue_size":[0-9]+' | cut -d: -f2 || echo "?")
+    echo -e "${G}queued${N} (in queue: $queue_size)"
+
+    # Don't sleep after the last one
+    if [ "$n" -lt "$TOTAL" ]; then
+        sleep "$GAP"
+    fi
+done
+
+echo ""
+echo -e "${G}✓ Hotovo.${N} Pokud notifikace nedorazily, zkontroluj:"
+echo "    1. SSE spojení – aplikace musí mít LIVE badge (zelený)"
+echo "    2. Notifikace povolené v nastavení telefonu"
+echo "    3. Logy backendu:  journalctl -u drilex -n 30"

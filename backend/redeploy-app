@@ -113,7 +113,15 @@ rsync -a --delete \
     --exclude='__pycache__/' \
     "$SRC/" "$INSTALL_DIR/"
 chown -R "$USER_NAME:$USER_NAME" "$INSTALL_DIR"
-chmod +x "$INSTALL_DIR/redeploy.sh" 2>/dev/null || true
+chmod +x "$INSTALL_DIR/redeploy-app" 2>/dev/null || true
+chmod +x "$INSTALL_DIR/testnotifyapp" 2>/dev/null || true
+
+# Globální symlink pro testnotifyapp
+if [ -f "$INSTALL_DIR/testnotifyapp" ]; then
+    cp "$INSTALL_DIR/testnotifyapp" /usr/local/bin/testnotifyapp
+    chmod +x /usr/local/bin/testnotifyapp
+    info "Nainstalováno: testnotifyapp → /usr/local/bin/"
+fi
 
 # ── 5. Python venv + dependencies ───────────────────────────────
 if [ ! -d "$INSTALL_DIR/venv" ]; then
