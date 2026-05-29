@@ -115,13 +115,7 @@ rsync -a --delete \
 chown -R "$USER_NAME:$USER_NAME" "$INSTALL_DIR"
 chmod +x "$INSTALL_DIR/redeploy-app" 2>/dev/null || true
 chmod +x "$INSTALL_DIR/testnotifyapp" 2>/dev/null || true
-
-# Globální symlink pro testnotifyapp
-if [ -f "$INSTALL_DIR/testnotifyapp" ]; then
-    cp "$INSTALL_DIR/testnotifyapp" /usr/local/bin/testnotifyapp
-    chmod +x /usr/local/bin/testnotifyapp
-    info "Nainstalováno: testnotifyapp → /usr/local/bin/"
-fi
+# Globální /usr/local/bin/ symlinky řeší krok 11 (self-update)
 
 # ── 5. Python venv + dependencies ───────────────────────────────
 if [ ! -d "$INSTALL_DIR/venv" ]; then
@@ -229,11 +223,15 @@ else
     die "Služba se nespustila. Logy: journalctl -u $SERVICE -n 50"
 fi
 
-# ── 11. Self-install: zkopíruj sám sebe do /usr/local/bin/ ──────
-GLOBAL_BIN="/usr/local/bin/redeploy-app"
-SELF="$(readlink -f "$0")"
-if [ "$SELF" != "$GLOBAL_BIN" ] && [ -d "/usr/local/bin" ]; then
-    cp "$INSTALL_DIR/redeploy-app" "$GLOBAL_BIN" 2>/dev/null || cp "$SELF" "$GLOBAL_BIN"
-    chmod +x "$GLOBAL_BIN"
-    info "Nainstalováno globálně – příště stačí: sudo redeploy-app"
-fi
+# ── 11. Self-update: vždy zkopíruj nejnovější verzi do /usr/local/bin/ ──
+# Není to jen "first-run install" – pokud se v repo změní redeploy-app
+# nebo testnotifyapp, tady se to propíše do globálního umístění.
+for tool in redeploy-app testnotifyapp; do
+    if [ -f "$INSTALL_DIR/$tool" ]; then
+        if ! cmp -s "$INSTALL_DIR/$tool" "/usr/local/bin/$tool" 2>/dev/null; then
+            cp "$INSTALL_DIR/$tool" "/usr/local/bin/$tool"
+            chmod +x "/usr/local/bin/$tool"
+            info "Aktualizováno: /usr/local/bin/$tool"
+        fi
+    fi
+done
