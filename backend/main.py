@@ -96,9 +96,15 @@ VALID_DOCKER_ACTIONS = {"start", "stop", "restart", "pause", "unpause", "remove"
 _alert_state: dict[str, float] = {}
 ALERT_COOLDOWN = 300.0  # 5 minutes
 
-# Queue for test notifications – drained by every active SSE generator
-_test_events: deque = deque(maxlen=50)
+# Single notification queue – background monitor pushes alerts here,
+# SSE generators drain it. Survives app being closed (in-memory only,
+# resets on backend restart). Capped to prevent unbounded growth.
+_notification_queue: deque = deque(maxlen=100)
 VALID_TEST_KINDS = {"cpu", "ram", "disk", "ssh", "heartbeat"}
+
+# Background monitor state (module-level so single task tracks across SSE clients)
+_bg_last_ssh_ts: float = 0.0
+_bg_alert_ts: dict[str, float] = {"cpu": 0.0, "ram": 0.0, "disk": 0.0}
 
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
@@ -811,34 +817,97 @@ async def test_notify(request: Request, body: TestNotifyRequest, _: str = Depend
         "ssh":       "[TEST] SSH login from 1.2.3.4 (user: root, publickey)",
         "heartbeat": "[TEST] Heartbeat lost — server unreachable",
     }
-    _test_events.append({
+    _notification_queue.append({
         "type": "alert",
         "kind": body.kind,
         "message": body.message or default_messages[body.kind],
         "timestamp": int(time.time()),
         "test": True,
     })
-    return {"ok": True, "queued": body.kind, "queue_size": len(_test_events)}
+    return {"ok": True, "queued": body.kind, "queue_size": len(_notification_queue)}
+
+
+# ── Background alert monitor (běží furt, queue přežívá zavřenou aplikaci) ────
+
+async def background_alert_monitor():
+    """
+    Always-running task. Detekuje CPU/RAM/Disk threshold breaches a SSH loginy.
+    Pushuje notifikace do _notification_queue, kde si je vyzvedne SSE klient
+    při dalším připojení (nebo hned, je-li připojený).
+    """
+    global _bg_last_ssh_ts
+    _bg_last_ssh_ts = time.time()
+    # Prime psutil so the first reading isn't zero
+    psutil.cpu_percent(interval=None)
+
+    while True:
+        try:
+            now = time.time()
+            cpu = psutil.cpu_percent(interval=None)
+            ram = psutil.virtual_memory()
+            disk_u = psutil.disk_usage("/")
+
+            if cpu > 80 and now - _bg_alert_ts["cpu"] > ALERT_COOLDOWN:
+                _bg_alert_ts["cpu"] = now
+                _notification_queue.append({
+                    "type": "alert", "kind": "cpu", "value": round(cpu, 1),
+                    "message": f"CPU usage high: {cpu:.1f}%",
+                    "timestamp": int(now),
+                })
+            if ram.percent > 80 and now - _bg_alert_ts["ram"] > ALERT_COOLDOWN:
+                _bg_alert_ts["ram"] = now
+                _notification_queue.append({
+                    "type": "alert", "kind": "ram", "value": round(ram.percent, 1),
+                    "message": f"RAM usage high: {ram.percent:.1f}%",
+                    "timestamp": int(now),
+                })
+            if disk_u.percent > 90 and now - _bg_alert_ts["disk"] > ALERT_COOLDOWN:
+                _bg_alert_ts["disk"] = now
+                _notification_queue.append({
+                    "type": "alert", "kind": "disk", "value": round(disk_u.percent, 1),
+                    "message": f"Disk usage critical: {disk_u.percent:.1f}%",
+                    "timestamp": int(now),
+                })
+
+            # SSH login check (in executor to not block event loop)
+            loop = asyncio.get_event_loop()
+            ssh_logins = await loop.run_in_executor(None, _check_ssh, _bg_last_ssh_ts)
+            _bg_last_ssh_ts = now
+            for login in ssh_logins:
+                _notification_queue.append({
+                    "type": "alert", "kind": "ssh",
+                    "message": f"SSH: {login[:120]}",
+                    "timestamp": int(now),
+                })
+        except Exception as exc:
+            # Don't crash the task on errors – log and continue
+            print(f"[bg_monitor] error: {exc}", flush=True)
+
+        await asyncio.sleep(5)
+
+
+@app.on_event("startup")
+async def _start_background_tasks():
+    asyncio.create_task(background_alert_monitor())
 
 
 @app.get("/api/events/stream")
 async def events_stream(request: Request, token: Optional[str] = None):
-    """Server-Sent Events stream: stats every 5s + threshold alerts + SSH logins."""
+    """Server-Sent Events stream: stats every 5s + drains queued notifications."""
     verify_token_or_query(request, token)
 
-    last_ssh_ts = time.time()
-    alert_ts: dict[str, float] = {"cpu": 0.0, "ram": 0.0, "disk": 0.0}
-    COOLDOWN = 300.0  # 5 minutes per alert type
-
     async def generate():
-        nonlocal last_ssh_ts
-
-        # Tell EventSource to retry every 5s if disconnected, and send first packet immediately
+        # Tell EventSource to retry every 5s if disconnected
         yield "retry: 5000\n\n"
         yield ": connected\n\n"
 
+        # Drain any queued notifications IMMEDIATELY on connect
+        # (so notifications missed while app was closed arrive right away)
+        while _notification_queue:
+            ev = _notification_queue.popleft()
+            yield f"data: {_json.dumps(ev)}\n\n"
+
         while True:
-            # Disconnect check
             try:
                 if await request.is_disconnected():
                     break
@@ -846,43 +915,18 @@ async def events_stream(request: Request, token: Optional[str] = None):
                 break
 
             now = time.time()
-
-            # Stats snapshot
             cpu = psutil.cpu_percent(interval=None)
             ram = psutil.virtual_memory()
             disk_u = psutil.disk_usage("/")
 
             yield f"data: {_json.dumps({'type': 'stats', 'cpu': round(cpu, 1), 'ram': round(ram.percent, 1), 'disk': round(disk_u.percent, 1), 'timestamp': int(now)})}\n\n"
 
-            # Drain queued test notifications (from /api/test/notify)
-            while _test_events:
-                ev = _test_events.popleft()
+            # Drain new notifications queued by background monitor (or /api/test/notify)
+            while _notification_queue:
+                ev = _notification_queue.popleft()
                 yield f"data: {_json.dumps(ev)}\n\n"
 
-            # CPU alert (>80%, 5min cooldown)
-            if cpu > 80 and now - alert_ts["cpu"] > COOLDOWN:
-                alert_ts["cpu"] = now
-                yield f"data: {_json.dumps({'type': 'alert', 'kind': 'cpu', 'value': round(cpu, 1), 'message': f'CPU usage high: {cpu:.1f}%'})}\n\n"
-
-            # RAM alert (>80%)
-            if ram.percent > 80 and now - alert_ts["ram"] > COOLDOWN:
-                alert_ts["ram"] = now
-                yield f"data: {_json.dumps({'type': 'alert', 'kind': 'ram', 'value': round(ram.percent, 1), 'message': f'RAM usage high: {ram.percent:.1f}%'})}\n\n"
-
-            # Disk alert (>90%)
-            if disk_u.percent > 90 and now - alert_ts["disk"] > COOLDOWN:
-                alert_ts["disk"] = now
-                yield f"data: {_json.dumps({'type': 'alert', 'kind': 'disk', 'value': round(disk_u.percent, 1), 'message': f'Disk usage critical: {disk_u.percent:.1f}%'})}\n\n"
-
-            # SSH login check (run in executor so it doesn't block event loop)
-            loop = asyncio.get_event_loop()
-            ssh_ts_snap = last_ssh_ts
-            ssh_logins = await loop.run_in_executor(None, _check_ssh, ssh_ts_snap)
-            last_ssh_ts = now
-            for login in ssh_logins:
-                yield f"data: {_json.dumps({'type': 'alert', 'kind': 'ssh', 'message': login})}\n\n"
-
-            # Heartbeat ping
+            # Heartbeat ping (keepalive for connection tracking)
             yield f"data: {_json.dumps({'type': 'heartbeat', 'timestamp': int(now)})}\n\n"
 
             await asyncio.sleep(5)

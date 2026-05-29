@@ -238,18 +238,24 @@ main#page-content {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* Toast */
+/* Toast – above content, slides down from top */
 .toast-stack {
-  position: fixed; bottom: 20px; left: 16px; right: 16px;
-  display: flex; flex-direction: column; gap: 8px; z-index: 200;
+  position: fixed;
+  top: calc(72px + env(safe-area-inset-top, 0px));   /* under app header */
+  left: 12px; right: 12px;
+  display: flex; flex-direction: column-reverse; gap: 8px; z-index: 200;
   pointer-events: none;
 }
 .toast {
   background: var(--surface); border: 1px solid var(--border);
   border-radius: 10px; padding: 12px 14px;
   display: flex; align-items: center; gap: 10px;
-  font-size: 13px; animation: slidein 0.25s; pointer-events: auto;
-  box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+  font-size: 13px; animation: toast-in 0.25s ease-out; pointer-events: auto;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+}
+@keyframes toast-in {
+  from { transform: translateY(-100%); opacity: 0; }
+  to   { transform: translateY(0); opacity: 1; }
 }
 .toast.cpu { border-left: 3px solid var(--primary); }
 .toast.ram { border-left: 3px solid var(--accent); }
