@@ -195,9 +195,17 @@ if [ -f "$INSTALL_DIR/nginx.conf" ] && command -v nginx >/dev/null; then
     [ -n "$TMP_NGX" ] && rm -f "$TMP_NGX"
 fi
 
-# ── 9. Restart service ──────────────────────────────────────────
-log "Restartuji službu"
-systemctl restart "$SERVICE"
+# ── 9. Restart service (s timeout safeguardem) ──────────────────
+# Pokud systemctl restart zatuhne (např. SSE streamy neumí ukončit cleanup),
+# po 20s force-killneme uvicorn a startneme čistě.
+log "Restartuji službu (max 20 s)"
+if ! timeout 20 systemctl restart "$SERVICE" 2>/dev/null; then
+    warn "Restart trvá moc dlouho – force kill + start"
+    pkill -9 -f "uvicorn main:app" 2>/dev/null || true
+    sleep 1
+    systemctl reset-failed "$SERVICE" 2>/dev/null || true
+    systemctl start "$SERVICE"
+fi
 
 # ── 10. Health check ────────────────────────────────────────────
 sleep 3
