@@ -45,3 +45,4 @@ První úspěšný build (2026-05-29):
 - Android SDK Platform 35 + Build-tools 35.0.0
 - Node.js 24.14.0
 - APK: ~4 MB (debug)
+- Minor bugs
