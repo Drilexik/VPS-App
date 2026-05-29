@@ -1,0 +1,22 @@
+{
+  "name": "drilex-vps",
+  "version": "1.0.0",
+  "description": "Drilex VPS Manager - Capacitor wrapper",
+  "scripts": {
+    "init": "cap init \"Drilex VPS\" com.drilex.vps --web-dir=www",
+    "add:android": "cap add android",
+    "sync": "cap sync android",
+    "build:debug": "cap sync android && cd android && gradlew.bat assembleDebug",
+    "build:release": "cap sync android && cd android && gradlew.bat assembleRelease",
+    "run": "cap run android",
+    "open": "cap open android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.3.4",
+    "@capacitor/app": "^8.1.0",
+    "@capacitor/cli": "^8.3.4",
+    "@capacitor/core": "^8.3.4",
+    "@capacitor/local-notifications": "^8.2.0",
+    "@capacitor/preferences": "^8.0.1"
+  }
+}

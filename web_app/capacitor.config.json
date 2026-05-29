@@ -1,0 +1,14 @@
+{
+  "appId": "com.drilex.vps",
+  "appName": "Drilex VPS",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": false
+  },
+  "plugins": {
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_icon_config_sample",
+      "iconColor": "#8B5CF6"
+    }
+  }
+}

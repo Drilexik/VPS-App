@@ -191,62 +191,60 @@ sudo systemctl restart drilex
 
 ---
 
-## 10. Sestavení Flutter APK
+## 10. Sestavení Android APK (Capacitor)
 
-### Předpoklady (na vašem vývojovém počítači)
-- Flutter SDK ≥ 3.16 (`flutter --version`)
-- Android SDK / Android Studio
-- Java 17+
+> Verze 1.2 nahradila Flutter za **Capacitor** (HTML/CSS/JS → nativní APK). Flutter app je zachována ve složce `flutter_app/` jako záloha, ale není dále vyvíjena.
 
-### Vytvoření Flutter projektu
-```bash
-# Pokud ještě nemáte projekt vytvořený
-flutter create drilex_vps
-cd drilex_vps
+### Předpoklady (na vývojovém PC)
+- **Node.js 18+** (`node --version`)
+- **Java JDK 21** (`java -version`) — `winget install Microsoft.OpenJDK.21`
+- **Android SDK** s platformou 35 + build-tools 35
+- `ANDROID_HOME` musí být nastavena
 
-# Zkopírujte naše soubory
-# (přepište obsah lib/ a pubspec.yaml z tohoto repozitáře)
-cp -r /path/to/VPS-App/flutter_app/lib ./
-cp /path/to/VPS-App/flutter_app/pubspec.yaml ./
+Bez Android Studia stačí `cmdline-tools` + `platform-tools` + `platforms;android-35` + `build-tools;35.0.0` (viz `web_app/README.md` pro one-liner).
 
-# Nahraďte AndroidManifest.xml
-cp /path/to/VPS-App/flutter_app/android/app/src/main/AndroidManifest.xml \
-   ./android/app/src/main/AndroidManifest.xml
+### Build (PowerShell – Windows)
+```powershell
+cd web_app
+
+# První build:
+npm install
+npx cap add android
+.\build.ps1            # debug APK
+
+# Každý další build po změně www/:
+.\build.ps1            # debug
+.\build.ps1 release    # release (nepodepsaný)
 ```
 
-### Úprava android/app/build.gradle
-```groovy
-android {
-    defaultConfig {
-        minSdkVersion 21    // Vyžadováno pro flutter_secure_storage
-        targetSdkVersion 34
-    }
-}
+### Build (bash – Linux/macOS)
+```bash
+cd web_app
+npm install
+npx cap add android
+./build.sh             # debug
+./build.sh release     # release
 ```
 
-### Build
-```bash
-# Závislosti
-flutter pub get
+Skript spustí `npx cap sync android` (zkopíruje `www/` do Android projektu) a poté Gradle. Cesta k APK se vypíše na konci.
 
-# Debug APK (pro testování)
-flutter build apk --debug
-
-# Release APK (bez podpisu – pro osobní použití)
-flutter build apk --release
-
-# APK bude v:
-# build/app/outputs/flutter-apk/app-release.apk
+```
+android/app/build/outputs/apk/debug/app-debug.apk
+android/app/build/outputs/apk/release/app-release-unsigned.apk
 ```
 
 ### Instalace na telefon
 ```bash
 # Přes USB (zapněte USB debugging)
-flutter install
+npx cap run android
 
-# Nebo zkopírujte APK na telefon přes USB/email a nainstalujte ručně
-# (musíte povolit "Instalace z neznámých zdrojů" v nastavení telefonu)
+# Nebo manuálně:
+# Přesuňte app-debug.apk na telefon a nainstalujte
+# (povolte "Instalace z neznámých zdrojů")
 ```
+
+### Editace UI/logiky
+Veškerý zdrojový kód aplikace je v `web_app/www/` (HTML/CSS/JS). Po každé změně spusťte build skript – Capacitor automaticky synchronizuje soubory do Android projektu.
 
 ---
 
@@ -335,41 +333,40 @@ ssh user@your-vps "sudo cp /tmp/nginx-drilex.conf /etc/nginx/sites-available/dri
 
 ---
 
-### Flutter app – nový build a instalace APK
+### Android app – nový build a instalace APK (Capacitor)
 
-Po každé změně Flutter kódu:
+Po každé změně v `web_app/www/`:
 
-```bash
-# Přejděte do složky flutter_app
-cd flutter_app
+```powershell
+cd web_app
 
-# Pokud jste změnili pubspec.yaml (nové balíčky)
-flutter pub get
-
-# Sestavte release APK
-flutter build apk --release
-
-# APK se nachází v:
-# build/app/outputs/flutter-apk/app-release.apk
+# Build (Capacitor sync + Gradle assemble)
+.\build.ps1           # debug
+.\build.ps1 release   # release (bez podpisu, pro osobní použití)
 ```
+
+APK je v:  
+`web_app\android\app\build\outputs\apk\debug\app-debug.apk`
 
 **Instalace přes USB (nejrychlejší):**
-```bash
+```powershell
 # Telefon musí mít zapnutý USB debugging
-flutter install --release
+npx cap run android
 ```
 
-**Instalace ručně (bez USB debugging):**
-```bash
-# Zkopírujte APK na telefon
-adb push build/app/outputs/flutter-apk/app-release.apk /sdcard/Download/drilex.apk
-
-# Nebo přes Windows – zkopírujte APK do sdíleného úložiště telefonu
-# a nainstalujte v telefonu (Soubory → Stažené → drilex.apk)
-# Musíte povolit "Instalace z neznámých zdrojů" v Nastavení → Zabezpečení
+**Instalace ručně:**
+```powershell
+# Zkopírujte APK na telefon přes USB nebo cloud
+# Otevřete v telefonu → povolte "Instalace z neznámých zdrojů"
 ```
 
-> Při přechodu z debug na release APK, nebo při změně `applicationId`, může být nutné nejprve odinstalovat starou verzi.
+**Když jste přidali Capacitor plugin (např. nová oprávnění):**
+```powershell
+npm install @capacitor/plugin-name
+.\build.ps1
+```
+
+> Při přechodu z debug na release APK, nebo při změně `appId`, je obvykle nutné nejprve odinstalovat starou verzi.
 
 ---
 
@@ -413,29 +410,16 @@ VPS-App/
 │   ├── .env.example         # Šablona env proměnných
 │   ├── drilex.service       # Systemd service
 │   └── nginx.conf           # Nginx konfigurace
-├── flutter_app/
-│   ├── pubspec.yaml
-│   ├── lib/
-│   │   ├── main.dart                    # Entry point, routing
-│   │   ├── theme/app_theme.dart         # Design systém
-│   │   ├── models/models.dart           # Datové modely
-│   │   ├── services/api_service.dart    # HTTP klient
-│   │   ├── providers/auth_provider.dart # Auth state
-│   │   ├── widgets/
-│   │   │   ├── gauge_widget.dart        # Kruhové gauge
-│   │   │   ├── stat_card.dart           # Info karty
-│   │   │   └── app_drawer.dart          # Navigační drawer
-│   │   └── screens/
-│   │       ├── setup_screen.dart        # Přihlášení
-│   │       ├── home_screen.dart         # Dashboard
-│   │       ├── stats_screen.dart        # Statistiky
-│   │       ├── processes_screen.dart    # CPU/RAM procesy
-│   │       ├── disk_screen.dart         # Správa souborů
-│   │       ├── network_screen.dart      # Síť + IP ban
-│   │       ├── docker_screen.dart       # Docker kontejnery
-│   │       ├── docker_logs_screen.dart  # Logy kontejnerů
-│   │       └── terminal_screen.dart     # Terminál
-│   └── android/
-│       └── app/src/main/AndroidManifest.xml
+├── web_app/                 # Aplikace (Capacitor + vanilla JS)
+│   ├── package.json         # npm závislosti
+│   ├── capacitor.config.json
+│   ├── build.ps1 / build.sh # CLI build skripty
+│   ├── www/                 # Zdrojový kód (HTML/CSS/JS)
+│   │   ├── index.html       # SPA struktura
+│   │   ├── style.css        # Dark téma
+│   │   ├── api.js           # Fetch API klient
+│   │   ├── monitor.js       # SSE + notifikace
+│   │   └── app.js           # Routing + obrazovky
+│   └── android/             # Vygenerováno přes `cap add android`
 └── DEPLOYMENT.md            # Tento soubor
 ```

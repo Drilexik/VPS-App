@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#0E0E14">
+  <title>Drilex VPS</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- ── SETUP SCREEN ──────────────────────────────────────────── -->
+  <div class="screen" id="screen-setup">
+    <div class="setup-wrap">
+      <div class="logo">
+        <div class="logo-icon"><svg viewBox="0 0 24 24" width="48" height="48"><path fill="#8B5CF6" d="M3 4h18c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H3c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2zm0 2v12h18V6H3zm2 2h14v2H5V8zm0 4h14v2H5v-2zm0 4h8v2H5v-2z"/></svg></div>
+        <h1>Drilex VPS</h1>
+        <p class="subtitle">Server Manager</p>
+      </div>
+      <div class="form">
+        <label>Backend URL</label>
+        <input type="url" id="input-url" placeholder="https://your-vps.com" autocomplete="url">
+        <label>API Key</label>
+        <input type="password" id="input-key" placeholder="••••••••••••••••" autocomplete="current-password">
+        <button id="btn-connect" class="btn-primary">Connect</button>
+        <div id="setup-error" class="error-msg hidden"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── MAIN APP ──────────────────────────────────────────────── -->
+  <div class="screen hidden" id="screen-main">
+    <header class="app-header">
+      <button class="icon-btn" id="btn-menu" aria-label="Menu">
+        <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M3 6h18v2H3V6zm0 5h18v2H3v-2zm0 5h18v2H3v-2z"/></svg>
+      </button>
+      <h1 class="header-title" id="header-title">Dashboard</h1>
+      <div class="live-badge" id="live-badge">
+        <span class="live-dot"></span>
+        <span class="live-text">SYNC</span>
+      </div>
+    </header>
+
+    <!-- Drawer -->
+    <div class="drawer hidden" id="drawer">
+      <div class="drawer-bg" data-close-drawer></div>
+      <nav class="drawer-nav">
+        <div class="drawer-header">
+          <div class="drawer-logo">
+            <svg viewBox="0 0 24 24" width="32" height="32"><path fill="#8B5CF6" d="M3 4h18c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H3c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/></svg>
+            <div>
+              <div class="drawer-name">Drilex VPS</div>
+              <div class="drawer-host" id="drawer-host"></div>
+            </div>
+          </div>
+        </div>
+        <a class="drawer-item active" data-page="home"><span class="ico">⌂</span>Dashboard</a>
+        <a class="drawer-item" data-page="stats"><span class="ico">▦</span>Statistics</a>
+        <a class="drawer-item" data-page="cpu"><span class="ico">⚡</span>CPU Monitor</a>
+        <a class="drawer-item" data-page="ram"><span class="ico">▣</span>RAM Monitor</a>
+        <a class="drawer-item" data-page="disk"><span class="ico">▤</span>Disk Manager</a>
+        <a class="drawer-item" data-page="network"><span class="ico">⌥</span>Network</a>
+        <a class="drawer-item" data-page="docker"><span class="ico">◈</span>Docker</a>
+        <a class="drawer-item" data-page="terminal"><span class="ico">▶</span>Terminal</a>
+        <div class="drawer-divider"></div>
+        <a class="drawer-item danger" id="btn-disconnect"><span class="ico">⏻</span>Disconnect</a>
+      </nav>
+    </div>
+
+    <main id="page-content"></main>
+
+    <!-- In-app alert banner area -->
+    <div class="toast-stack" id="toast-stack"></div>
+  </div>
+
+  <script src="capacitor.js"></script>
+  <script src="api.js"></script>
+  <script src="monitor.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
