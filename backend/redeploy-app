@@ -1,23 +1,24 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────
 #  Drilex VPS – Auto-redeploy z GitHubu
-#  Usage:  sudo ./redeploy.sh           (jednorázově)
-#          Cron: */5 * * * * /opt/drilex-backend/redeploy.sh
 #
-#  Při prvním spuštění udělá kompletní install:
-#    - naklonuje repo
-#    - vytvoří uživatele drilex
-#    - vytvoří Python venv + nainstaluje balíčky
-#    - vygeneruje .env s náhodným API klíčem
-#    - nainstaluje systemd service + nginx config
-#    - spustí service
+#  První instalace (z čisté VPS, jeden příkaz):
+#    curl -fsSL https://raw.githubusercontent.com/Drilexik/VPS-App/main/backend/redeploy-app \
+#      -o redeploy-app && chmod +x redeploy-app && sudo ./redeploy-app
 #
-#  Každý další běh:
-#    - git pull (pokud nic nového, končí ihned)
-#    - rsync změněných souborů (zachová .env + venv)
-#    - pip install pokud se změnil requirements.txt
-#    - reload systemd/nginx pokud se změnily
-#    - restart service + health check
+#  Každý další redeploy:
+#    sudo redeploy-app          (skript se po 1. běhu nainstaluje globálně)
+#
+#  Cron (auto-deploy každých 5 min):
+#    */5 * * * * /usr/local/bin/redeploy-app >> /var/log/drilex-deploy.log 2>&1
+#
+#  Co skript dělá:
+#    1. naklonuje / pullne repo z GitHubu
+#    2. zachová .env a venv/ při syncu
+#    3. nainstaluje/aktualizuje Python balíčky pokud se změnily
+#    4. aktualizuje systemd unit + nginx config pokud se změnily
+#    5. restartuje službu + zkontroluje /api/health
+#    6. zkopíruje sám sebe do /usr/local/bin/ (poprvé)
 # ─────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -176,4 +177,13 @@ if systemctl is-active --quiet "$SERVICE"; then
     fi
 else
     die "Služba se nespustila. Logy: journalctl -u $SERVICE -n 50"
+fi
+
+# ── 11. Self-install: zkopíruj sám sebe do /usr/local/bin/ ──────
+GLOBAL_BIN="/usr/local/bin/redeploy-app"
+SELF="$(readlink -f "$0")"
+if [ "$SELF" != "$GLOBAL_BIN" ] && [ -d "/usr/local/bin" ]; then
+    cp "$INSTALL_DIR/redeploy-app" "$GLOBAL_BIN" 2>/dev/null || cp "$SELF" "$GLOBAL_BIN"
+    chmod +x "$GLOBAL_BIN"
+    info "Nainstalováno globálně – příště stačí: sudo redeploy-app"
 fi

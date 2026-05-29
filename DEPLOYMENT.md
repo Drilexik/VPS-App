@@ -191,9 +191,9 @@ sudo systemctl restart drilex
 
 ---
 
-## 10. Sestavení Android APK (Capacitor)
+## 10. Sestavení Android APK
 
-> Verze 1.2 nahradila Flutter za **Capacitor** (HTML/CSS/JS → nativní APK). Flutter app je zachována ve složce `flutter_app/` jako záloha, ale není dále vyvíjena.
+Mobilní aplikace je postavena na **Capacitor** (HTML/CSS/JS → nativní APK).
 
 ### Předpoklady (na vývojovém PC)
 - **Node.js 18+** (`node --version`)
@@ -255,7 +255,7 @@ Veškerý zdrojový kód aplikace je v `web_app/www/` (HTML/CSS/JS). Po každé 
 3. Zadejte **API Key**: váš klíč z `.env` souboru
 4. Klikněte **Connect**
 
-Credentials se bezpečně uloží do Android Keystore (přes flutter_secure_storage).
+Credentials se uloží přes `@capacitor/preferences` (Android šifrované úložiště).
 
 ---
 
@@ -283,127 +283,75 @@ Potom upravte volání iptables v `main.py` – přidejte `"sudo"` jako první a
 
 ### 🚀 Auto-deploy z GitHubu (doporučeno)
 
-Repo: https://github.com/Drilexik/VPS-App
+Repo: **https://github.com/Drilexik/VPS-App**
 
-V `backend/redeploy.sh` je hotový skript, který:
-- při prvním spuštění udělá kompletní install (user, venv, .env s náhodným klíčem, systemd, nginx)
-- při dalších spuštěních pulluje z GitHubu, syncuje kód, restartuje službu
-- automaticky vynechá `.env` a `venv/` (zůstanou zachovány)
-- ověří health endpoint po restartu
+Hotový skript [`backend/redeploy-app`](backend/redeploy-app) udělá veškerou práci – stačí ho jednou stáhnout a spustit.
 
-**První spuštění na čisté VPS:**
+#### První instalace na čisté VPS (one-liner)
+
 ```bash
-# Stáhněte skript přímo z GitHubu a spusťte
-curl -fsSL https://raw.githubusercontent.com/Drilexik/VPS-App/main/backend/redeploy.sh -o /tmp/redeploy.sh
-sudo bash /tmp/redeploy.sh
+curl -fsSL https://raw.githubusercontent.com/Drilexik/VPS-App/main/backend/redeploy-app -o redeploy-app \
+  && chmod +x redeploy-app \
+  && sudo ./redeploy-app
 ```
 
-Skript vypíše náhodně vygenerovaný API klíč – uložte ho do aplikace na telefonu.
+Skript:
+1. Naklonuje repo do `/opt/drilex-repo`
+2. Vytvoří uživatele `drilex` + skupinu `docker` (pokud existuje)
+3. Nainstaluje Python venv + balíčky z `requirements.txt`
+4. **Vygeneruje `.env` s náhodným 64-znakovým API klíčem a vypíše ho** ← uložte do aplikace
+5. Nainstaluje systemd unit + nginx config
+6. Spustí službu a ověří `/api/health`
+7. **Sám se zkopíruje do `/usr/local/bin/redeploy-app`** → příště stačí volat odkudkoli
 
-**Každý další redeploy** (po push na GitHub):
+#### Každý další redeploy (po push na GitHub)
+
 ```bash
-sudo /opt/drilex-backend/redeploy.sh
+sudo redeploy-app
 ```
 
-**Plně automatický deploy přes cron** (každých 5 minut zkontroluje GitHub):
+Skript:
+- `git pull` – pokud žádný nový commit, **okamžitě skončí bez restartu**
+- `rsync` změněných souborů (ignoruje `.env`, `venv/`, `__pycache__/`)
+- `pip install` pouze pokud se změnil `requirements.txt`
+- reload systemd/nginx pouze pokud se změnily (s `nginx -t` validací a rollbackem)
+- `systemctl restart drilex` + health check
+
+#### Plně automatický deploy přes cron
+
 ```bash
 sudo crontab -e
 # Přidejte řádek:
-*/5 * * * * /opt/drilex-backend/redeploy.sh >> /var/log/drilex-deploy.log 2>&1
+*/5 * * * * /usr/local/bin/redeploy-app >> /var/log/drilex-deploy.log 2>&1
 ```
 
-Skript je idempotentní – pokud na GitHubu nic nového, okamžitě skončí bez restartu.
+Každých 5 minut zkontroluje GitHub. Idempotentní – beze změn na repu nic nedělá.
+
+#### Workflow při vývoji
+
+```bash
+# Na vývojovém PC:
+git add . && git commit -m "fix XYZ" && git push
+
+# Na VPS (manuálně):
+sudo redeploy-app
+
+# Nebo počkat 5 min na cron
+```
 
 ---
 
-### Manuální redeploy (bez GitHubu)
+### Android app – nový build APK
 
-#### Backend – aktualizace kódu
-
-Po každé změně `main.py` nebo `requirements.txt` stačí:
-
-```bash
-# 1. Nahrajte změněné soubory na VPS
-scp ./backend/main.py drilex@your-vps:/opt/drilex-backend/main.py
-
-# Pokud změníte requirements.txt, aktualizujte i balíčky
-scp ./backend/requirements.txt drilex@your-vps:/opt/drilex-backend/requirements.txt
-sudo -u drilex bash -c "cd /opt/drilex-backend && source venv/bin/activate && pip install -r requirements.txt"
-
-# 2. Restartujte service
-sudo systemctl restart drilex
-
-# 3. Ověřte stav
-sudo systemctl status drilex
-curl http://127.0.0.1:8000/api/health
-```
-
-Pro hromadnou synchronizaci celého adresáře (doporučeno):
-```bash
-# rsync přeskočí nezměněné soubory
-rsync -av --exclude='venv/' --exclude='.env' \
-    ./backend/ drilex@your-vps:/opt/drilex-backend/
-
-# Poté restartujte
-ssh user@your-vps "sudo systemctl restart drilex"
-```
-
-> **Pozor:** Soubor `.env` nikdy nepřepisujte rsync/scp – obsahuje váš API klíč. Používejte `--exclude='.env'`.
-
----
-
-### Backend – aktualizace systemd service nebo nginx
-
-Pokud změníte `drilex.service`:
-```bash
-scp ./backend/drilex.service drilex@your-vps:/tmp/drilex.service
-ssh user@your-vps "sudo cp /tmp/drilex.service /etc/systemd/system/drilex.service && sudo systemctl daemon-reload && sudo systemctl restart drilex"
-```
-
-Pokud změníte `nginx.conf`:
-```bash
-scp ./backend/nginx.conf user@your-vps:/tmp/nginx-drilex.conf
-ssh user@your-vps "sudo cp /tmp/nginx-drilex.conf /etc/nginx/sites-available/drilex && sudo nginx -t && sudo systemctl reload nginx"
-```
-
-> `nginx -t` ověří konfiguraci před reloadem – pokud selže, nginx se nepřestane.
-
----
-
-### Android app – nový build a instalace APK (Capacitor)
-
-Po každé změně v `web_app/www/`:
+Po změně v `web_app/www/` spusťte build skript znovu (viz [sekce 10](#10-sestavení-android-apk)):
 
 ```powershell
 cd web_app
-
-# Build (Capacitor sync + Gradle assemble)
-.\build.ps1           # debug
-.\build.ps1 release   # release (bez podpisu, pro osobní použití)
+.\build.ps1            # debug
+.\build.ps1 release    # release
 ```
 
-APK je v:  
-`web_app\android\app\build\outputs\apk\debug\app-debug.apk`
-
-**Instalace přes USB (nejrychlejší):**
-```powershell
-# Telefon musí mít zapnutý USB debugging
-npx cap run android
-```
-
-**Instalace ručně:**
-```powershell
-# Zkopírujte APK na telefon přes USB nebo cloud
-# Otevřete v telefonu → povolte "Instalace z neznámých zdrojů"
-```
-
-**Když jste přidali Capacitor plugin (např. nová oprávnění):**
-```powershell
-npm install @capacitor/plugin-name
-.\build.ps1
-```
-
-> Při přechodu z debug na release APK, nebo při změně `appId`, je obvykle nutné nejprve odinstalovat starou verzi.
+Poté `npx cap run android` (USB) nebo zkopírovat APK ručně.
 
 ---
 
@@ -417,8 +365,8 @@ sudo journalctl -u drilex -f --since "1 hour ago"
 sudo tail -f /var/log/nginx/access.log
 sudo tail -f /var/log/nginx/error.log
 
-# Restart backendu po úpravě kódu
-sudo systemctl restart drilex
+# Logy auto-deploye (pokud používáte cron)
+sudo tail -f /var/log/drilex-deploy.log
 
 # Obnova SSL certifikátu (automaticky přes cron)
 sudo certbot renew --dry-run
@@ -447,7 +395,7 @@ VPS-App/
 │   ├── .env.example         # Šablona env proměnných
 │   ├── drilex.service       # Systemd service
 │   ├── nginx.conf           # Nginx konfigurace
-│   └── redeploy.sh          # Auto-deploy skript (klonuje z GitHubu)
+│   └── redeploy-app         # Auto-deploy skript (klonuje z GitHubu)
 ├── web_app/                 # Aplikace (Capacitor + vanilla JS)
 │   ├── package.json         # npm závislosti
 │   ├── capacitor.config.json

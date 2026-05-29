@@ -1,6 +1,6 @@
 # Drilex VPS – Web App (Capacitor)
 
-Vanilla HTML/CSS/JS aplikace zabalená přes [Capacitor](https://capacitorjs.com/) do nativního Android APK. Žádný Flutter, žádný Dart – jen webové technologie + jednoduchý CLI build.
+Vanilla HTML/CSS/JS aplikace zabalená přes [Capacitor](https://capacitorjs.com/) do nativního Android APK. Build je jeden CLI příkaz.
 
 ---
 
@@ -136,7 +136,7 @@ Credentials se uloží přes `@capacitor/preferences` (na Androidu šifrované �
 - **Network** – stats rozhraní + ban/unban IP přes iptables
 - **Docker** – seznam, start/stop/restart, logy
 - **Terminal** – whitelisted příkazy
-- **Push notifikace** – CPU/RAM > 80 %, Disk > 90 %, SSH login, ztracený heartbeat (zatím jen když je app v paměti – background runner odebrán pro stabilitu buildu, lze doplnit později)
+- **Push notifikace** – CPU/RAM > 80 %, Disk > 90 %, SSH login (fungují když je app v paměti)
 
 ---
 
