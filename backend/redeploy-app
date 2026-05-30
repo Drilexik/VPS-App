@@ -225,19 +225,22 @@ else
     die "Služba se nespustila. Logy: journalctl -u $SERVICE -n 50"
 fi
 
-# ── 11. Self-update: vždy zkopíruj nejnovější verzi do /usr/local/bin/ ──
-# Atomic mv – nepřepíše inode který bash právě čte (jinak bash padá uprostřed
-# self-update na "syntax error" když mu zmizí offset, který právě parsuje).
-{
-    for tool in redeploy-app testnotifyapp; do
-        src="$INSTALL_DIR/$tool"
-        dst="/usr/local/bin/$tool"
-        if [ -f "$src" ] && ! cmp -s "$src" "$dst" 2>/dev/null; then
-            cp "$src" "${dst}.new"
-            chmod +x "${dst}.new"
-            mv -f "${dst}.new" "$dst"
-            info "Aktualizováno: $dst"
-        fi
-    done
-    exit 0
-}
+# ── 11. Self-update ─────────────────────────────────────────────
+# testnotifyapp – přepis je bezpečný (nic z něj neběží)
+if [ -f "$INSTALL_DIR/testnotifyapp" ] && \
+   ! cmp -s "$INSTALL_DIR/testnotifyapp" "/usr/local/bin/testnotifyapp" 2>/dev/null; then
+    cp "$INSTALL_DIR/testnotifyapp" "/usr/local/bin/testnotifyapp"
+    chmod +x "/usr/local/bin/testnotifyapp"
+    info "Aktualizováno: /usr/local/bin/testnotifyapp"
+fi
+
+# redeploy-app – přepisuje sám sebe → detached background proces
+# spustí se až po skončení tohoto skriptu, aby bash neselhal mid-parse.
+if [ -f "$INSTALL_DIR/redeploy-app" ] && \
+   ! cmp -s "$INSTALL_DIR/redeploy-app" "/usr/local/bin/redeploy-app" 2>/dev/null; then
+    nohup bash -c "sleep 1 && cp '$INSTALL_DIR/redeploy-app' '/usr/local/bin/redeploy-app' && chmod +x '/usr/local/bin/redeploy-app'" >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+    info "redeploy-app bude aktualizován za sekundu (nový kód efektivní příští spuštění)"
+fi
+
+exit 0
