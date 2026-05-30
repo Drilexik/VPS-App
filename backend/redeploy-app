@@ -110,6 +110,8 @@ mkdir -p "$INSTALL_DIR"
 rsync -a --delete \
     --exclude='venv/' \
     --exclude='.env' \
+    --exclude='firebase-key.json' \
+    --exclude='fcm_tokens.json' \
     --exclude='__pycache__/' \
     "$SRC/" "$INSTALL_DIR/"
 chown -R "$USER_NAME:$USER_NAME" "$INSTALL_DIR"
