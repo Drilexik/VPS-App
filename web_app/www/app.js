@@ -114,6 +114,16 @@ const App = {
     notify.markForeground();
     this.monitor.start();
     this.showPage('home');
+
+    // Register FCM token with backend when it arrives (push notifications)
+    notify.onTokenReceived(async (token) => {
+      try {
+        await this.api._req('/api/push/register', { method: 'POST', body: { token } });
+        console.log('[push] FCM token registered with backend');
+      } catch (e) {
+        console.warn('[push] failed to register token:', e.message);
+      }
+    });
   },
 
   // Menu button → open drawer

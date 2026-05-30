@@ -208,6 +208,14 @@ const notify = {
   available: false,
   _lastForegroundAt: Date.now(),
   _toastStack: null,
+  _fcmToken: null,
+  _registerCallback: null,
+
+  // Set a callback to be called when FCM token arrives (used to register with backend)
+  onTokenReceived(fn) {
+    if (this._fcmToken) fn(this._fcmToken);          // already received
+    else this._registerCallback = fn;
+  },
 
   // Request notification permission + create Android channel (called at app boot)
   async init() {
@@ -220,13 +228,44 @@ const notify = {
           await LN.createChannel({
             id: 'drilex-default',
             name: 'Drilex VPS Alerts',
-            importance: 4,
-            visibility: 1,
+            importance: 4,           // HIGH = heads-up notification (Samsung floating)
+            visibility: 1,            // PUBLIC – show on lockscreen
             sound: 'default',
+            lights: true,
+            lightColor: '#8B5CF6',
+            vibration: true,
           });
           this.available = true;
         }
       } catch (e) { console.warn('Notifications init failed:', e); }
+    }
+    // Register for FCM push notifications (separate from LocalNotifications).
+    // Push is delivered by Google's servers, works even when app is fully killed.
+    // Requires Firebase setup (google-services.json + backend service account).
+    if (window.Capacitor && Capacitor.isNativePlatform && Capacitor.isNativePlatform()) {
+      try {
+        const PN = Capacitor.Plugins.PushNotifications;
+        if (PN) {
+          const perm = await PN.requestPermissions();
+          if (perm.receive === 'granted') {
+            await PN.register();
+            // Token arrives asynchronously
+            PN.addListener('registration', async (tokenObj) => {
+              this._fcmToken = tokenObj.value;
+              console.log('[push] FCM token received');
+              if (this._registerCallback) this._registerCallback(tokenObj.value);
+            });
+            PN.addListener('registrationError', (err) => {
+              console.warn('[push] registration error:', err);
+            });
+            // When push arrives while app is open → show as toast
+            PN.addListener('pushNotificationReceived', (n) => {
+              this._toast('info', n.title || 'Drilex VPS', n.body || '');
+            });
+            // When user taps notification → just focus app (default behavior)
+          }
+        }
+      } catch (e) { console.warn('PushNotifications init failed:', e); }
     }
   },
 
@@ -235,7 +274,8 @@ const notify = {
     this._lastForegroundAt = Date.now();
   },
 
-  // Send notification – in-app toast always + native push when backgrounded
+  // Send notification – in-app toast always + native heads-up when backgrounded.
+  // Heads-up (Samsung "floating") = channel importance HIGH + matching channelId.
   async show({ kind, title, body }) {
     this._toast(kind, title, body);
     if (this.available && document.visibilityState === 'hidden') {
@@ -244,9 +284,13 @@ const notify = {
         await LN.schedule({
           notifications: [{
             id: Math.floor(Math.random() * 1e9),
-            title, body,
+            title,
+            body,
             channelId: 'drilex-default',
-            smallIcon: 'ic_stat_icon',
+            smallIcon: 'ic_stat_drilex',
+            largeIcon: 'ic_launcher',
+            sound: null,                 // use channel default
+            autoCancel: true,
           }]
         });
       } catch (e) { console.warn('notify failed:', e); }

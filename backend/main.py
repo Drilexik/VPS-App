@@ -6,9 +6,19 @@ import shlex
 import subprocess
 import time
 from collections import deque
+from pathlib import Path
 from typing import Optional
 
 import psutil
+
+# Firebase Cloud Messaging (optional – only loaded if firebase-admin is installed
+# AND the service-account key file exists).
+try:
+    import firebase_admin
+    from firebase_admin import credentials, messaging
+    _firebase_available = True
+except ImportError:
+    _firebase_available = False
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -105,6 +115,79 @@ VALID_TEST_KINDS = {"cpu", "ram", "disk", "ssh", "heartbeat"}
 # Background monitor state (module-level so single task tracks across SSE clients)
 _bg_last_ssh_ts: float = 0.0
 _bg_alert_ts: dict[str, float] = {"cpu": 0.0, "ram": 0.0, "disk": 0.0}
+
+# ── FCM (Firebase Cloud Messaging) setup ─────────────────────────────────────
+FCM_KEY_PATH = os.getenv("FIREBASE_KEY_PATH", "/opt/drilex-backend/firebase-key.json")
+FCM_TOKENS_PATH = "/opt/drilex-backend/fcm_tokens.json"
+_fcm_initialized = False
+_fcm_tokens: set[str] = set()
+
+def _load_fcm_tokens():
+    global _fcm_tokens
+    try:
+        if Path(FCM_TOKENS_PATH).exists():
+            with open(FCM_TOKENS_PATH) as f:
+                _fcm_tokens = set(_json.load(f))
+    except Exception as e:
+        print(f"[fcm] failed to load tokens: {e}", flush=True)
+        _fcm_tokens = set()
+
+def _save_fcm_tokens():
+    try:
+        with open(FCM_TOKENS_PATH, "w") as f:
+            _json.dump(list(_fcm_tokens), f)
+    except Exception as e:
+        print(f"[fcm] failed to save tokens: {e}", flush=True)
+
+def _init_firebase():
+    """Initialize firebase_admin if SDK + key file are both available. Idempotent."""
+    global _fcm_initialized
+    if _fcm_initialized or not _firebase_available:
+        return
+    if not Path(FCM_KEY_PATH).exists():
+        print(f"[fcm] Firebase key not found at {FCM_KEY_PATH} – push notifications disabled.", flush=True)
+        return
+    try:
+        cred = credentials.Certificate(FCM_KEY_PATH)
+        firebase_admin.initialize_app(cred)
+        _fcm_initialized = True
+        print("[fcm] Firebase admin SDK initialized – push notifications enabled.", flush=True)
+    except Exception as e:
+        print(f"[fcm] failed to init: {e}", flush=True)
+
+def _send_push(title: str, body: str, kind: str = "info"):
+    """Send FCM push to all registered devices. No-op if FCM not configured."""
+    if not _fcm_initialized or not _fcm_tokens:
+        return
+    bad_tokens = []
+    # Send individually so one bad token doesn't fail all
+    for token in list(_fcm_tokens):
+        try:
+            msg = messaging.Message(
+                notification=messaging.Notification(title=title, body=body),
+                data={"kind": kind},
+                token=token,
+                android=messaging.AndroidConfig(
+                    priority="high",
+                    notification=messaging.AndroidNotification(
+                        channel_id="drilex-default",
+                        icon="ic_stat_drilex",
+                        color="#8B5CF6",
+                        sound="default",
+                        default_vibrate_timings=True,
+                    ),
+                ),
+            )
+            messaging.send(msg)
+        except messaging.UnregisteredError:
+            bad_tokens.append(token)
+        except Exception as e:
+            print(f"[fcm] send failed for token: {e}", flush=True)
+    # Cleanup unregistered tokens
+    if bad_tokens:
+        for t in bad_tokens:
+            _fcm_tokens.discard(t)
+        _save_fcm_tokens()
 
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
@@ -249,6 +332,10 @@ class TestNotifyRequest(BaseModel):
         if v not in VALID_TEST_KINDS:
             raise ValueError(f"kind must be one of {VALID_TEST_KINDS}")
         return v
+
+
+class PushRegisterRequest(BaseModel):
+    token: str
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -817,14 +904,44 @@ async def test_notify(request: Request, body: TestNotifyRequest, _: str = Depend
         "ssh":       "[TEST] SSH login from 1.2.3.4 (user: root, publickey)",
         "heartbeat": "[TEST] Heartbeat lost — server unreachable",
     }
+    msg = body.message or default_messages[body.kind]
     _notification_queue.append({
         "type": "alert",
         "kind": body.kind,
-        "message": body.message or default_messages[body.kind],
+        "message": msg,
         "timestamp": int(time.time()),
         "test": True,
     })
-    return {"ok": True, "queued": body.kind, "queue_size": len(_notification_queue)}
+    # Send FCM push too – delivers even when app is killed
+    _send_push(title=f"Drilex VPS (TEST)", body=msg, kind=body.kind)
+    return {
+        "ok": True,
+        "queued": body.kind,
+        "queue_size": len(_notification_queue),
+        "fcm_devices": len(_fcm_tokens) if _fcm_initialized else 0,
+    }
+
+
+# ── Push notification token registration ──────────────────────────────────────
+
+@app.post("/api/push/register")
+@limiter.limit("20/minute")
+async def push_register(request: Request, body: PushRegisterRequest, _: str = Depends(verify_token)):
+    """Register a device's FCM token to receive push notifications."""
+    if not body.token or len(body.token) < 10:
+        raise HTTPException(400, "Invalid token")
+    _fcm_tokens.add(body.token)
+    _save_fcm_tokens()
+    return {"ok": True, "devices": len(_fcm_tokens), "fcm_active": _fcm_initialized}
+
+
+@app.post("/api/push/unregister")
+@limiter.limit("20/minute")
+async def push_unregister(request: Request, body: PushRegisterRequest, _: str = Depends(verify_token)):
+    """Unregister a device (called on logout)."""
+    _fcm_tokens.discard(body.token)
+    _save_fcm_tokens()
+    return {"ok": True, "devices": len(_fcm_tokens)}
 
 
 # ── Background alert monitor (běží furt, queue přežívá zavřenou aplikaci) ────
@@ -849,36 +966,40 @@ async def background_alert_monitor():
 
             if cpu > 80 and now - _bg_alert_ts["cpu"] > ALERT_COOLDOWN:
                 _bg_alert_ts["cpu"] = now
+                msg = f"CPU usage high: {cpu:.1f}%"
                 _notification_queue.append({
                     "type": "alert", "kind": "cpu", "value": round(cpu, 1),
-                    "message": f"CPU usage high: {cpu:.1f}%",
-                    "timestamp": int(now),
+                    "message": msg, "timestamp": int(now),
                 })
+                _send_push("Drilex VPS", msg, "cpu")
             if ram.percent > 80 and now - _bg_alert_ts["ram"] > ALERT_COOLDOWN:
                 _bg_alert_ts["ram"] = now
+                msg = f"RAM usage high: {ram.percent:.1f}%"
                 _notification_queue.append({
                     "type": "alert", "kind": "ram", "value": round(ram.percent, 1),
-                    "message": f"RAM usage high: {ram.percent:.1f}%",
-                    "timestamp": int(now),
+                    "message": msg, "timestamp": int(now),
                 })
+                _send_push("Drilex VPS", msg, "ram")
             if disk_u.percent > 90 and now - _bg_alert_ts["disk"] > ALERT_COOLDOWN:
                 _bg_alert_ts["disk"] = now
+                msg = f"Disk usage critical: {disk_u.percent:.1f}%"
                 _notification_queue.append({
                     "type": "alert", "kind": "disk", "value": round(disk_u.percent, 1),
-                    "message": f"Disk usage critical: {disk_u.percent:.1f}%",
-                    "timestamp": int(now),
+                    "message": msg, "timestamp": int(now),
                 })
+                _send_push("Drilex VPS", msg, "disk")
 
             # SSH login check (in executor to not block event loop)
             loop = asyncio.get_event_loop()
             ssh_logins = await loop.run_in_executor(None, _check_ssh, _bg_last_ssh_ts)
             _bg_last_ssh_ts = now
             for login in ssh_logins:
+                msg = f"SSH: {login[:120]}"
                 _notification_queue.append({
                     "type": "alert", "kind": "ssh",
-                    "message": f"SSH: {login[:120]}",
-                    "timestamp": int(now),
+                    "message": msg, "timestamp": int(now),
                 })
+                _send_push("Drilex VPS - SSH login", login[:200], "ssh")
         except Exception as exc:
             # Don't crash the task on errors – log and continue
             print(f"[bg_monitor] error: {exc}", flush=True)
@@ -888,6 +1009,8 @@ async def background_alert_monitor():
 
 @app.on_event("startup")
 async def _start_background_tasks():
+    _load_fcm_tokens()
+    _init_firebase()
     asyncio.create_task(background_alert_monitor())
 
 
